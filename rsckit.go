@@ -319,6 +319,20 @@ func (r *revalidations) all() []string {
 type callRequest struct {
 	Function string            `json:"function"`
 	Args     []json.RawMessage `json:"args"`
+	// A batch: several calls the renderer issued in one tick of a render,
+	// answered in order. Set instead of Function.
+	Calls []callRequest `json:"calls"`
+}
+
+// batchItem is one answer inside a batch, carrying the status the call
+// would have had on its own.
+type batchItem struct {
+	Status int `json:"status"`
+	callReply
+}
+
+type batchReply struct {
+	Replies []batchItem `json:"replies"`
 }
 
 // callReply is the wire shape, the same one Laravel answers with. Every
@@ -506,17 +520,6 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fn, ok := h.registry.lookup(call.Function)
-	if !ok {
-		// Named, because the JS side deliberately cannot say which function is
-		// missing — it does not know what this host registered.
-		writeReply(w, http.StatusNotFound, callReply{
-			Error: fmt.Sprintf("no host function named %q; registered: %v", call.Function, h.registry.Names()),
-		})
-
-		return
-	}
-
 	forwarded := http.Header{}
 	for _, name := range h.ForwardHeaders {
 		if v := r.Header.Get(name); v != "" {
@@ -524,20 +527,57 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	box := &revalidations{}
 	ctx := context.WithValue(r.Context(), headerKey, forwarded)
-	ctx = context.WithValue(ctx, revalidateKey, box)
 
-	result, err := h.call(ctx, fn, call.Args)
+	// A batch: one HTTP request for a page's parallel reads rather than one
+	// each. Every call is answered, in order, as it would have been alone -
+	// a refusal in the third is that call's answer, not a reason to leave the
+	// fourth unanswered.
+	if call.Calls != nil {
+		if len(call.Calls) == 0 {
+			writeReply(w, http.StatusBadRequest, callReply{Error: "a batch needs a non-empty \"calls\" list"})
 
-	if err != nil {
-		status, reply := replyFor(err)
-		writeReply(w, status, reply)
+			return
+		}
+
+		items := make([]batchItem, 0, len(call.Calls))
+		for _, one := range call.Calls {
+			status, reply := h.dispatch(ctx, one)
+			items = append(items, batchItem{Status: status, callReply: reply})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(batchReply{Replies: items})
 
 		return
 	}
 
-	writeReply(w, http.StatusOK, callReply{Result: result, Revalidate: box.all()})
+	status, reply := h.dispatch(ctx, call)
+	writeReply(w, status, reply)
+}
+
+// dispatch runs one call and decides its answer. Each call gets its own
+// revalidation box, so what one marked stale never rides on another's reply.
+func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, callReply) {
+	fn, ok := h.registry.lookup(call.Function)
+	if !ok {
+		// Named, because the JS side deliberately cannot say which function is
+		// missing — it does not know what this host registered.
+		return http.StatusNotFound, callReply{
+			Error: fmt.Sprintf("no host function named %q; registered: %v", call.Function, h.registry.Names()),
+		}
+	}
+
+	box := &revalidations{}
+	ctx = context.WithValue(ctx, revalidateKey, box)
+
+	result, err := h.call(ctx, fn, call.Args)
+	if err != nil {
+		return replyFor(err)
+	}
+
+	return http.StatusOK, callReply{Result: result, Revalidate: box.all()}
 }
 
 // replyFor turns what a function returned into the answer on the wire.

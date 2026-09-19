@@ -5,7 +5,7 @@ Host an rsc-kit application from a Go server.
 Go owns the request — sessions, auth, the database. The renderer owns
 rendering, because that half is React and there is no way around it. A server
 component reaches Go by calling `rpc()`, which arrives here as an ordinary
-POST; a `route.ts` names guards Go runs before a page renders; a server
+POST; a `middleware.ts` names guards Go runs before a page renders; a server
 action the browser calls is a Go function the build wrote a stub for.
 
 ```go
@@ -93,7 +93,7 @@ inside `fmt.Errorf("…: %w", err)`.
 ## Route middleware
 
 ```ts
-// app/admin/route.ts
+// app/admin/middleware.ts
 export const middleware = ['auth', 'can:manage-orders', 'throttle:60,1']
 ```
 
@@ -121,6 +121,13 @@ renamed, and nothing fails until the browser calls it.
 `rsckit.Revalidate(ctx, "orders")` inside an action marks a region stale, so
 the answer carries it re-rendered instead of the browser being told to ask
 again.
+
+## Batches
+
+Calls the renderer issued in one tick of a render — sibling components each
+awaiting `rpc()` — arrive as one POST and are answered in order, each with
+the status it would have had alone. `CallbackHandler` does this; a function
+never sees the difference, and each call keeps its own `Revalidate`.
 
 ## What a function sees
 

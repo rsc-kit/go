@@ -274,3 +274,79 @@ func TestAFallbackFromTheRendererIsNotProxiedBackToIt(t *testing.T) {
 		t.Fatalf("fallback: status %d after %d trips, want 404 and no new trip", res.StatusCode, trips)
 	}
 }
+
+// A batch: several calls in one POST, answered in order, each as it would
+// have been alone. One request for a page's parallel reads rather than one
+// each.
+func TestABatchAnswersEveryCallInOrderWithItsOwnStatus(t *testing.T) {
+	h := handler(t, func(r *Registry) {
+		r.Register("Orders.recent", func(_ context.Context, args Args) (any, error) {
+			var n int
+			if err := args.Bind(&n); err != nil {
+				return nil, err
+			}
+
+			return n * 2, nil
+		})
+		r.Register("Orders.create", func(ctx context.Context, _ Args) (any, error) {
+			Revalidate(ctx, "orders")
+
+			return nil, InvalidField("name", "Taken.")
+		})
+		r.Register("Me.session", func(context.Context, Args) (any, error) { return nil, Unauthenticated() })
+	})
+
+	rec := post(h, `{"calls":[
+		{"function":"Orders.recent","args":[21]},
+		{"function":"Orders.create","args":[]},
+		{"function":"Me.session","args":[]},
+		{"function":"Nope","args":[]}
+	]}`, nil)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var reply struct {
+		Replies []struct {
+			Status           int                 `json:"status"`
+			Result           any                 `json:"result"`
+			ValidationErrors map[string][]string `json:"validationErrors"`
+			Unauthenticated  bool                `json:"unauthenticated"`
+			Revalidate       []string            `json:"revalidate"`
+			Error            string              `json:"error"`
+		} `json:"replies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil {
+		t.Fatalf("not a batch reply: %s", rec.Body.String())
+	}
+
+	if len(reply.Replies) != 4 {
+		t.Fatalf("replies = %d, want 4", len(reply.Replies))
+	}
+
+	if r := reply.Replies[0]; r.Status != 200 || r.Result != float64(42) {
+		t.Fatalf("first = %+v", r)
+	}
+
+	// A refusal's revalidation does not ride out: the call did not succeed.
+	if r := reply.Replies[1]; r.Status != 422 || r.ValidationErrors["name"][0] != "Taken." {
+		t.Fatalf("second = %+v", r)
+	}
+
+	if r := reply.Replies[2]; r.Status != 401 || !r.Unauthenticated {
+		t.Fatalf("third = %+v", r)
+	}
+
+	if r := reply.Replies[3]; r.Status != 404 || !strings.Contains(r.Error, `"Nope"`) {
+		t.Fatalf("fourth = %+v", r)
+	}
+}
+
+func TestAnEmptyBatchIsRefused(t *testing.T) {
+	h := handler(t, func(*Registry) {})
+
+	if rec := post(h, `{"calls":[]}`, nil); rec.Code != 400 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
