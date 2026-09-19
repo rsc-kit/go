@@ -31,6 +31,7 @@ func main() {
 		secret   = flag.String("secret", "", "shared secret, matching httpHostCalls")
 		renderer = flag.String("renderer", "", "url of the JS renderer; pages are proxied to it when set")
 		path     = flag.String("path", "/__rsc/host-call", "where the renderer POSTs host calls")
+		actions  = flag.String("actions", "", "write rsc-host-actions.json here and continue")
 	)
 
 	flag.Parse()
@@ -185,6 +186,37 @@ func main() {
 	registry.Register("Orders.panic", func(context.Context, rsckit.Args) (any, error) {
 		panic("nil map write")
 	})
+
+	// Route guards, in the vocabulary a route.ts uses. The fixture's
+	// app/host-guard/route.ts names all three; only auth decides anything.
+	registry.Middleware("auth", func(ctx context.Context, _ string) error {
+		h := rsckit.HeadersFrom(ctx)
+		if strings.Contains(h.Get("Cookie"), "session=valid") || h.Get("Authorization") == "Bearer valid" {
+			return nil
+		}
+
+		return rsckit.Redirect("/login")
+	})
+	registry.Middleware("can", func(context.Context, string) error { return nil })
+	registry.Middleware("throttle", func(context.Context, string) error { return nil })
+
+	// A browser-callable action, and the manifest the build reads for it.
+	registry.RegisterAction("ordersCreate", "Orders.create.action", func(ctx context.Context, args rsckit.Args) (any, error) {
+		var name string
+		if err := args.Bind(&name); err != nil {
+			return nil, err
+		}
+
+		rsckit.Revalidate(ctx, "orders")
+
+		return map[string]any{"created": name}, nil
+	})
+
+	if *actions != "" {
+		if err := registry.WriteActionManifest(*actions); err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	callback, err := rsckit.NewCallbackHandler(registry, *secret)
 	if err != nil {

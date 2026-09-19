@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+// The two markers that keep a url neither process owns from bouncing between
+// them. The renderer forwards what its route tree does not own back to this
+// server with FallbackMarker set; this server forwards what it does not route
+// to the renderer with ProxiedMarker set. Each side, seeing the other's mark,
+// answers 404 itself instead of asking the same question a second time.
+const (
+	FallbackMarker = "X-Rsc-Renderer-Fallback"
+	ProxiedMarker  = "X-Rsc-Proxied-By-Backend"
+)
+
 // Renderer points at the JS process running @rsc-kit/core/host.
 type Renderer struct {
 	// Target is where it listens — "http://127.0.0.1:5173", or a unix socket
@@ -68,6 +78,9 @@ func newRenderer(target *url.URL, transport http.RoundTripper) *Renderer {
 			// reads it; SetXForwarded also stops a client-supplied
 			// X-Forwarded-For from being passed through as if it were ours.
 			r.SetXForwarded()
+			// Came from here. The renderer answers 404 for what it does not
+			// own rather than handing it back to be proxied again.
+			r.Out.Header.Set(ProxiedMarker, "1")
 		},
 		// Belt and braces, and worth knowing which. A streamed render arrives
 		// with no Content-Length, and ReverseProxy.flushInterval already
@@ -90,6 +103,15 @@ func newRenderer(target *url.URL, transport http.RoundTripper) *Renderer {
 }
 
 func (r *Renderer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// The renderer already asked its own route table and the answer was no;
+	// it is asking whether this server routes the url. Reaching the proxy
+	// means nothing here did either.
+	if req.Header.Get(FallbackMarker) != "" {
+		http.NotFound(w, req)
+
+		return
+	}
+
 	r.proxy.ServeHTTP(w, req)
 }
 

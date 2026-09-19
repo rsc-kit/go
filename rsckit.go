@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -68,19 +69,155 @@ func (a Args) Len() int { return len(a) }
 // Func is a function a server component can call.
 type Func func(ctx context.Context, args Args) (any, error)
 
+// Guard is a route middleware: something that must hold before anything at
+// or below a directory renders.
+//
+// A route.ts names guards in this host's vocabulary, and the renderer asks
+// for them by name before rendering - including before serving a page it
+// froze at build time. The param is what follows the colon in the name:
+// "can:manage-users" reaches the guard registered as "can" with
+// "manage-users"; "throttle:60,1" with "60,1"; "auth" with "".
+//
+// Return nil to let the render go ahead. Anything else refuses it, and the
+// error decides how: Unauthenticated answers 401, Redirect sends the visitor
+// to sign in, Refuse(429, ...) keeps a throttle's own status, and an
+// ordinary error is a 500. There is no way to refuse quietly, on purpose.
+type Guard func(ctx context.Context, param string) error
+
+// MiddlewareFunction is the reserved name the renderer asks route guards on.
+// It is answered by the registry itself, never registered by an app.
+const MiddlewareFunction = "__rsc.middleware"
+
 // Registry holds the functions this host answers.
 //
 // Safe for concurrent use: registration usually happens at startup, but a
 // render calls into it from whatever goroutine is serving the callback, and
 // several renders are in flight at once.
 type Registry struct {
-	mu  sync.RWMutex
-	fns map[string]Func
+	mu      sync.RWMutex
+	fns     map[string]Func
+	guards  map[string]Guard
+	actions map[string]string
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{fns: make(map[string]Func)}
+	return &Registry{
+		fns:     make(map[string]Func),
+		guards:  make(map[string]Guard),
+		actions: make(map[string]string),
+	}
+}
+
+// Middleware registers a guard under the name a route.ts uses for it.
+//
+// Registering a name twice panics, for the reason Register does.
+func (r *Registry) Middleware(name string, guard Guard) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.guards[name]; exists {
+		panic(fmt.Sprintf("rsckit: middleware %q registered twice", name))
+	}
+
+	r.guards[name] = guard
+}
+
+// RegisterAction registers a function the browser may call as a server
+// action, under jsName in the app's code.
+//
+// The build reads the map from rsc-host-actions.json and writes a "use server"
+// module exporting jsName; a client component imports it and calls it, and
+// the call arrives here under name. WriteActionManifest writes that file.
+func (r *Registry) RegisterAction(jsName, name string, fn Func) {
+	r.Register(name, fn)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.actions[jsName]; exists {
+		panic(fmt.Sprintf("rsckit: action %q registered twice", jsName))
+	}
+
+	r.actions[jsName] = name
+}
+
+// ActionManifest is what the build reads: the JavaScript name of each action
+// to the name it is registered under here.
+func (r *Registry) ActionManifest() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string]string, len(r.actions))
+	for js, name := range r.actions {
+		out[js] = name
+	}
+
+	return out
+}
+
+// WriteActionManifest writes rsc-host-actions.json where the build looks for
+// it - the project root, beside vite.config.ts.
+//
+// Run it before each build rather than by hand: a stale map names a function
+// that has since been renamed, and nothing fails until the browser calls it.
+// A registry with no actions writes an empty object, so a removed action
+// disappears from the generated module rather than lingering.
+func (r *Registry) WriteActionManifest(path string) error {
+	data, err := json.MarshalIndent(r.ActionManifest(), "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// runGuards answers the renderer's reserved call: every guard named, in
+// order, outermost first, stopping at the first refusal - an outer guard
+// saying no means the inner one should never have been asked.
+//
+// A name nothing here answers to is a refusal, not a pass. A route that
+// declares a guard this host does not have is a check that silently does not
+// happen, and the only safe reading of that is no.
+func (r *Registry) runGuards(ctx context.Context, args Args) (any, error) {
+	var names []string
+	if err := args.Bind(&names); err != nil {
+		return nil, err
+	}
+
+	for _, full := range names {
+		name, param, _ := strings.Cut(full, ":")
+
+		r.mu.RLock()
+		guard, ok := r.guards[name]
+		r.mu.RUnlock()
+
+		if !ok {
+			return nil, fmt.Errorf("route middleware %q is declared and this host has no guard named %q; registered: %v",
+				full, name, r.GuardNames())
+		}
+
+		if err := guard(ctx, param); err != nil {
+			return nil, err
+		}
+	}
+
+	return true, nil
+}
+
+// GuardNames lists the middleware this host answers to.
+func (r *Registry) GuardNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.guards))
+	for name := range r.guards {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 // Register adds a function under the name server components call it by.
@@ -91,6 +228,10 @@ func NewRegistry() *Registry {
 func (r *Registry) Register(name string, fn Func) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if name == MiddlewareFunction {
+		panic(fmt.Sprintf("rsckit: %q is reserved; register guards with Middleware", name))
+	}
 
 	if _, exists := r.fns[name]; exists {
 		panic(fmt.Sprintf("rsckit: host function %q registered twice", name))
@@ -110,10 +251,16 @@ func (r *Registry) Names() []string {
 		names = append(names, name)
 	}
 
+	sort.Strings(names)
+
 	return names
 }
 
 func (r *Registry) lookup(name string) (Func, bool) {
+	if name == MiddlewareFunction {
+		return r.runGuards, true
+	}
+
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -174,11 +321,19 @@ type callRequest struct {
 	Args     []json.RawMessage `json:"args"`
 }
 
+// callReply is the wire shape, the same one Laravel answers with. Every
+// outcome has its own field so the renderer never reads a message to tell an
+// invalid form from a broken server, or a redirect from a result.
 type callReply struct {
 	Result           any                 `json:"result,omitempty"`
 	Error            string              `json:"error,omitempty"`
 	Revalidate       []string            `json:"revalidate,omitempty"`
 	ValidationErrors map[string][]string `json:"validationErrors,omitempty"`
+	Unauthenticated  bool                `json:"unauthenticated,omitempty"`
+	Unauthorized     bool                `json:"unauthorized,omitempty"`
+	Redirect         string              `json:"redirect,omitempty"`
+	RedirectStatus   int                 `json:"redirectStatus,omitempty"`
+	RefusalStatus    int                 `json:"refusalStatus,omitempty"`
 }
 
 // ValidationError refuses the input, naming the fields and what is wrong with
@@ -217,6 +372,84 @@ func Invalid(errors map[string][]string) error {
 // InvalidField is the single-field case, which is most of them.
 func InvalidField(field string, messages ...string) error {
 	return &ValidationError{Errors: map[string][]string{field: messages}}
+}
+
+// AuthenticationError says the caller has no session. The render answers 401,
+// the way it would if a JavaScript guard had thrown ServerAuthenticationError.
+type AuthenticationError struct{ Message string }
+
+func (e *AuthenticationError) Error() string { return e.Message }
+
+// Unauthenticated refuses a call from nobody. The message is optional.
+func Unauthenticated(message ...string) error {
+	return &AuthenticationError{Message: first(message, "Unauthenticated.")}
+}
+
+// AuthorizationError says the caller has a session and still may not. 403.
+type AuthorizationError struct{ Message string }
+
+func (e *AuthorizationError) Error() string { return e.Message }
+
+// Unauthorized refuses a call from someone who is signed in and not allowed.
+func Unauthorized(message ...string) error {
+	return &AuthorizationError{Message: first(message, "This action is unauthorized.")}
+}
+
+// RedirectError sends the visitor somewhere else - to sign in, usually.
+//
+// It travels as a 200 with the destination in the body, never as a 3xx: an
+// HTTP client follows a redirect transparently, so a real one would send the
+// host call itself to the destination and hand whatever it found back to the
+// render as the function's result.
+type RedirectError struct {
+	Location string
+	// Status the browser is redirected with. 0 means 307, which keeps the
+	// method - a POSTed form stays a POST if it is redirected somewhere that
+	// expects one.
+	Status int
+}
+
+func (e *RedirectError) Error() string { return "redirect to " + e.Location }
+
+// Redirect answers a call by sending the visitor to location instead.
+func Redirect(location string, status ...int) error {
+	return &RedirectError{Location: location, Status: firstInt(status, 0)}
+}
+
+// RefusalError refuses with a status the guard chose - a throttle's 429, a
+// signed-url check's 403 - rather than the 500 an ordinary error becomes.
+// Collapsing them makes a rate-limited visitor indistinguishable from a broken
+// server, in the logs and to the person looking at it.
+type RefusalError struct {
+	Status  int
+	Message string
+}
+
+func (e *RefusalError) Error() string { return e.Message }
+
+// Refuse answers with status, and says why.
+func Refuse(status int, message string) error {
+	if message == "" {
+		message = http.StatusText(status)
+	}
+
+	return &RefusalError{Status: status, Message: message}
+}
+
+func first(values []string, fallback string) string {
+	if len(values) > 0 && values[0] != "" {
+		return values[0]
+	}
+
+	return fallback
+}
+
+func firstInt(values []int, fallback int) int {
+	if len(values) > 0 && values[0] != 0 {
+		return values[0]
+	}
+
+	return fallback
 }
 
 // ErrNoSecret is returned by NewCallbackHandler when built without one.
@@ -297,24 +530,44 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.call(ctx, fn, call.Args)
 
-	// A refusal is an answer, not a failure. 422 rather than 500, and the
-	// fields travel in their own key so the renderer can tell one from the
-	// other without parsing a message.
-	var invalid *ValidationError
-
-	if errors.As(err, &invalid) {
-		writeReply(w, http.StatusUnprocessableEntity, callReply{ValidationErrors: invalid.Errors})
-
-		return
-	}
-
 	if err != nil {
-		writeReply(w, http.StatusInternalServerError, callReply{Error: err.Error()})
+		status, reply := replyFor(err)
+		writeReply(w, status, reply)
 
 		return
 	}
 
 	writeReply(w, http.StatusOK, callReply{Result: result, Revalidate: box.all()})
+}
+
+// replyFor turns what a function returned into the answer on the wire.
+//
+// A refusal is an answer, not a failure: each kind has its own status and its
+// own field, so the renderer can tell them apart without parsing a message.
+// Only an error that is none of these is the 500 the visitor did not cause.
+func replyFor(err error) (int, callReply) {
+	var (
+		invalid  *ValidationError
+		noone    *AuthenticationError
+		mayNot   *AuthorizationError
+		redirect *RedirectError
+		refused  *RefusalError
+	)
+
+	switch {
+	case errors.As(err, &invalid):
+		return http.StatusUnprocessableEntity, callReply{ValidationErrors: invalid.Errors}
+	case errors.As(err, &noone):
+		return http.StatusUnauthorized, callReply{Unauthenticated: true, Error: noone.Message}
+	case errors.As(err, &mayNot):
+		return http.StatusForbidden, callReply{Unauthorized: true, Error: mayNot.Message}
+	case errors.As(err, &redirect):
+		return http.StatusOK, callReply{Redirect: redirect.Location, RedirectStatus: redirect.Status}
+	case errors.As(err, &refused):
+		return refused.Status, callReply{Error: refused.Message, RefusalStatus: refused.Status}
+	}
+
+	return http.StatusInternalServerError, callReply{Error: err.Error()}
 }
 
 // call runs the function, turning a panic into an error.
