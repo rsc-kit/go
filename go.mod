@@ -1,3 +1,3 @@
-module github.com/rsc-kit/rsc-kit/adapters/go
+module github.com/rsc-kit/go
 
 go 1.23

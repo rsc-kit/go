@@ -2,6 +2,10 @@
 
 Host an rsc-kit application from a Go server.
 
+```sh
+go get github.com/rsc-kit/go
+```
+
 Go owns the request — sessions, auth, the database. The renderer owns
 rendering, because that half is React and there is no way around it. A server
 component reaches Go by calling `rpc()`, which arrives here as an ordinary
@@ -45,7 +49,7 @@ RSC_HOST_CALL_SECRET=a-long-random-string
 
 The renderer reads them in development (`vite`) and in production (the built
 server) and wires `rpc()` to the endpoint. There is no JavaScript to write for
-Go; `examples/go-backend` in the repository is the whole arrangement, runnable.
+Go; [`examples/go-backend`](https://github.com/rsc-kit/rsc-kit/tree/main/examples/go-backend) in the engine's repository is the whole arrangement, runnable.
 
 ## Why there is no frame protocol here
 
@@ -149,8 +153,11 @@ markers that keep a url neither side owns from bouncing between them.
 ## Tests
 
 `go test ./...` covers the contract from this side. The end-to-end proof — a
-real page rendered by the engine with data, guards and actions from
-`examples/hostserver` — lives with the engine in
-`packages/core/tests/js/goAdapter*.test.ts`, which build the example, run it
-and render against it. An example that is executed is an example that cannot
-drift.
+real page rendered by the engine with data, guards, actions and batches from a
+Go server — lives with the engine, in
+[`packages/core/tests/js/goAdapter*.test.ts`](https://github.com/rsc-kit/rsc-kit/tree/main/packages/core/tests/js),
+which build a host server on this module, run it and render against it. A
+contract change is released here first, and the engine's fixture follows.
+
+Guides, the contract every backend answers, and a runnable example at
+[rsc-kit.dev/hosts/go](https://rsc-kit.dev/hosts/go).
