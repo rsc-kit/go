@@ -275,10 +275,11 @@ func TestAFallbackFromTheRendererIsNotProxiedBackToIt(t *testing.T) {
 	}
 }
 
-// A batch: several calls in one POST, answered in order, each as it would
-// have been alone. One request for a page's parallel reads rather than one
-// each.
-func TestABatchAnswersEveryCallInOrderWithItsOwnStatus(t *testing.T) {
+// A batch: several calls in one POST, each answered as it would have been
+// alone - one JSON line per call, carrying its index, written the moment
+// the call finishes. One request for a page's parallel reads rather than
+// one each, and a fast read is not held behind a slow sibling.
+func TestABatchAnswersEveryCallOnItsOwnLineWithItsOwnStatus(t *testing.T) {
 	h := handler(t, func(r *Registry) {
 		r.Register("Orders.recent", func(_ context.Context, args Args) (any, error) {
 			var n int
@@ -307,41 +308,114 @@ func TestABatchAnswersEveryCallInOrderWithItsOwnStatus(t *testing.T) {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var reply struct {
-		Replies []struct {
-			Status           int                 `json:"status"`
-			Result           any                 `json:"result"`
-			ValidationErrors map[string][]string `json:"validationErrors"`
-			Unauthenticated  bool                `json:"unauthenticated"`
-			Revalidate       []string            `json:"revalidate"`
-			Error            string              `json:"error"`
-		} `json:"replies"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil {
-		t.Fatalf("not a batch reply: %s", rec.Body.String())
+	if ct := rec.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Fatalf("content type = %q, want application/x-ndjson", ct)
 	}
 
-	if len(reply.Replies) != 4 {
-		t.Fatalf("replies = %d, want 4", len(reply.Replies))
+	type line struct {
+		Index            int                 `json:"index"`
+		Status           int                 `json:"status"`
+		Result           any                 `json:"result"`
+		ValidationErrors map[string][]string `json:"validationErrors"`
+		Unauthenticated  bool                `json:"unauthenticated"`
+		Revalidate       []string            `json:"revalidate"`
+		Error            string              `json:"error"`
 	}
 
-	if r := reply.Replies[0]; r.Status != 200 || r.Result != float64(42) {
+	// In whatever order they finished; by index they are the four calls.
+	byIndex := map[int]line{}
+	for _, raw := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
+		var l line
+		if err := json.Unmarshal([]byte(raw), &l); err != nil {
+			t.Fatalf("not a batch line: %s", raw)
+		}
+		byIndex[l.Index] = l
+	}
+
+	if len(byIndex) != 4 {
+		t.Fatalf("lines = %d, want 4: %s", len(byIndex), rec.Body.String())
+	}
+
+	if r := byIndex[0]; r.Status != 200 || r.Result != float64(42) {
 		t.Fatalf("first = %+v", r)
 	}
 
 	// A refusal's revalidation does not ride out: the call did not succeed.
-	if r := reply.Replies[1]; r.Status != 422 || r.ValidationErrors["name"][0] != "Taken." {
+	if r := byIndex[1]; r.Status != 422 || r.ValidationErrors["name"][0] != "Taken." {
 		t.Fatalf("second = %+v", r)
 	}
 
-	if r := reply.Replies[2]; r.Status != 401 || !r.Unauthenticated {
+	if r := byIndex[2]; r.Status != 401 || !r.Unauthenticated {
 		t.Fatalf("third = %+v", r)
 	}
 
-	if r := reply.Replies[3]; r.Status != 404 || !strings.Contains(r.Error, `"Nope"`) {
+	if r := byIndex[3]; r.Status != 404 || !strings.Contains(r.Error, `"Nope"`) {
 		t.Fatalf("fourth = %+v", r)
 	}
 }
+
+// A fast call's line is written before a slow sibling has finished: the
+// batch saved the round trips, and the page's boundaries still stream
+// independently.
+func TestAFastCallIsAnsweredBeforeASlowSiblingFinishes(t *testing.T) {
+	release := make(chan struct{})
+	h := handler(t, func(r *Registry) {
+		r.Register("Fast", func(context.Context, Args) (any, error) { return "fast", nil })
+		r.Register("Slow", func(context.Context, Args) (any, error) {
+			<-release
+
+			return "slow", nil
+		})
+	})
+
+	pr, pw := io.Pipe()
+	req := httptest.NewRequest(http.MethodPost, "/__rsc/host-call", strings.NewReader(`{"calls":[{"function":"Slow","args":[]},{"function":"Fast","args":[]}]}`))
+	req.Header.Set(SecretHeader, secret)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer pw.Close()
+		h.ServeHTTP(&pipeWriter{header: http.Header{}, w: pw}, req)
+	}()
+
+	first := make([]byte, 0, 64)
+	buf := make([]byte, 1)
+	for {
+		if _, err := pr.Read(buf); err != nil {
+			t.Fatalf("stream closed before the fast line: %v", err)
+		}
+		first = append(first, buf[0])
+		if buf[0] == '\n' {
+			break
+		}
+	}
+
+	// Released before any verdict: a Fatalf with the slow call still parked
+	// would leave the handler blocked on the pipe and the test never ending.
+	close(release)
+
+	if !strings.Contains(string(first), `"index":1`) || !strings.Contains(string(first), `"fast"`) {
+		go io.Copy(io.Discard, pr)
+		t.Fatalf("first line = %s, want the fast call", first)
+	}
+
+	go io.Copy(io.Discard, pr)
+	<-done
+}
+
+// pipeWriter is a ResponseWriter whose body is a pipe, so a test can read
+// the first line while the handler is still writing the rest.
+type pipeWriter struct {
+	header http.Header
+	w      *io.PipeWriter
+	code   int
+}
+
+func (p *pipeWriter) Header() http.Header         { return p.header }
+func (p *pipeWriter) WriteHeader(code int)        { p.code = code }
+func (p *pipeWriter) Write(b []byte) (int, error) { return p.w.Write(b) }
+func (p *pipeWriter) Flush()                      {}
 
 func TestAnEmptyBatchIsRefused(t *testing.T) {
 	h := handler(t, func(*Registry) {})

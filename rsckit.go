@@ -324,15 +324,13 @@ type callRequest struct {
 	Calls []callRequest `json:"calls"`
 }
 
-// batchItem is one answer inside a batch, carrying the status the call
-// would have had on its own.
-type batchItem struct {
+// batchLine is one answer inside a batch, written the moment its call has
+// finished: the call's position in the batch, the status it would have had
+// on its own, and the reply. One JSON line each, in order of completion.
+type batchLine struct {
+	Index  int `json:"index"`
 	Status int `json:"status"`
 	callReply
-}
-
-type batchReply struct {
-	Replies []batchItem `json:"replies"`
 }
 
 // callReply is the wire shape, the same one Laravel answers with. Every
@@ -530,9 +528,11 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), headerKey, forwarded)
 
 	// A batch: one HTTP request for a page's parallel reads rather than one
-	// each. Every call is answered, in order, as it would have been alone -
-	// a refusal in the third is that call's answer, not a reason to leave the
-	// fourth unanswered.
+	// each. The calls run concurrently, and each is answered the moment it
+	// finishes - one JSON line, carrying its index - so a component waiting
+	// on a fast read paints while a slow sibling's is still running. Every
+	// call is answered as it would have been alone: a refusal in the third
+	// is that call's answer, not a reason to leave the fourth unanswered.
 	if call.Calls != nil {
 		if len(call.Calls) == 0 {
 			writeReply(w, http.StatusBadRequest, callReply{Error: "a batch needs a non-empty \"calls\" list"})
@@ -540,21 +540,53 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		items := make([]batchItem, 0, len(call.Calls))
-		for _, one := range call.Calls {
-			status, reply := h.dispatch(ctx, one)
-			items = append(items, batchItem{Status: status, callReply: reply})
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(batchReply{Replies: items})
+		h.serveBatch(ctx, w, call.Calls)
 
 		return
 	}
 
 	status, reply := h.dispatch(ctx, call)
 	writeReply(w, status, reply)
+}
+
+// serveBatch answers a batch as NDJSON, each line as its call completes.
+func (h *CallbackHandler) serveBatch(ctx context.Context, w http.ResponseWriter, calls []callRequest) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	// A proxy that buffers would hold the fast answer behind the slow one,
+	// which is the one thing this shape exists to avoid.
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
+	for i, one := range calls {
+		wg.Add(1)
+
+		go func(index int, one callRequest) {
+			defer wg.Done()
+
+			status, reply := h.dispatch(ctx, one)
+			line, err := json.Marshal(batchLine{Index: index, Status: status, callReply: reply})
+			if err != nil {
+				line, _ = json.Marshal(batchLine{Index: index, Status: http.StatusInternalServerError, callReply: callReply{Error: err.Error()}})
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			_, _ = w.Write(append(line, '\n'))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}(i, one)
+	}
+
+	wg.Wait()
 }
 
 // dispatch runs one call and decides its answer. Each call gets its own
