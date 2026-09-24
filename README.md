@@ -37,6 +37,16 @@ reg.Middleware("auth", func(ctx context.Context, _ string) error {
 
 callback, err := rsckit.NewCallbackHandler(reg, os.Getenv("RSC_HOST_CALL_SECRET"))
 http.Handle("POST /__rsc/host-call", callback)
+
+// The package never builds a server, so its timeouts are yours. Without
+// them a client that sends its headers a byte at a time holds a goroutine
+// for as long as it likes.
+server := &http.Server{
+    Addr:              "127.0.0.1:8080",
+    ReadHeaderTimeout: 5 * time.Second,
+    IdleTimeout:       120 * time.Second,
+}
+log.Fatal(server.ListenAndServe())
 ```
 
 The JavaScript side is what `bun create rsc-kit` writes, plus two lines in
@@ -129,9 +139,16 @@ again.
 ## Batches
 
 Calls the renderer issued in one tick of a render — sibling components each
-awaiting `rpc()` — arrive as one POST and are answered in order, each with
-the status it would have had alone. `CallbackHandler` does this; a function
-never sees the difference, and each call keeps its own `Revalidate`.
+awaiting `rpc()` — arrive as one POST. They run **concurrently**, and each is
+answered on its own NDJSON line the moment it finishes, with the status it
+would have had alone, so a fast read paints while a slow one is still going.
+`CallbackHandler` does this; each call keeps its own `Revalidate` and gets
+its own copy of the forwarded headers.
+
+Concurrently is the difference from Laravel, which runs a batch one call at a
+time: a function that touches shared state must be safe to run beside itself.
+A batch carries at most `rsckit.MaxBatch` (50) calls, the renderer's own
+limit; a larger one is refused with 413.
 
 ## What a function sees
 
@@ -140,7 +157,9 @@ never sees the difference, and each call keeps its own `Revalidate`.
 - `rsckit.HeadersFrom(ctx)` has the forwarded `Cookie` and `Authorization`.
   Empty during a build-time render, which has no visitor.
 - A panic becomes an error for that one call. It does not take down the
-  server, and every other render in flight survives it.
+  server, and every other render in flight survives it — including a panic
+  in a result's own `MarshalJSON`. The panic is logged with its stack
+  through `rsckit.Logger` (the standard logger unless you set it).
 
 ## Go in front
 
