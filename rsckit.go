@@ -27,8 +27,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -283,8 +285,10 @@ const (
 // pass these to whatever reads a session and the answer is theirs. Empty
 // during a build-time render, which has no visitor and should not have one.
 func HeadersFrom(ctx context.Context) http.Header {
+	// A copy: the calls in a batch run concurrently and share one set, so a
+	// function that set a header on what it was handed raced its siblings.
 	if h, ok := ctx.Value(headerKey).(http.Header); ok {
-		return h
+		return h.Clone()
 	}
 
 	return http.Header{}
@@ -313,14 +317,16 @@ func (r *revalidations) all() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.targets
+	// A copy, so a Revalidate from a goroutine that outlived its function
+	// cannot race the reply being written.
+	return append([]string(nil), r.targets...)
 }
 
 type callRequest struct {
 	Function string            `json:"function"`
 	Args     []json.RawMessage `json:"args"`
 	// A batch: several calls the renderer issued in one tick of a render,
-	// answered in order. Set instead of Function.
+	// run concurrently and answered as each finishes. Set instead of Function.
 	Calls []callRequest `json:"calls"`
 }
 
@@ -504,8 +510,11 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ConstantTimeCompare rather than ==: this is a secret being checked on a
 	// network endpoint, and its length is already known to anyone who looks at
 	// the config.
+	// Checked before the comparison, not left to it: ConstantTimeCompare of
+	// two empty values is a match, so a handler built without
+	// NewCallbackHandler would admit a request that carried no secret.
 	given := []byte(r.Header.Get(SecretHeader))
-	if subtle.ConstantTimeCompare(given, h.secret) != 1 {
+	if len(h.secret) == 0 || subtle.ConstantTimeCompare(given, h.secret) != 1 {
 		writeReply(w, http.StatusForbidden, callReply{Error: "bad or missing host secret"})
 
 		return
@@ -520,8 +529,10 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	forwarded := http.Header{}
 	for _, name := range h.ForwardHeaders {
-		if v := r.Header.Get(name); v != "" {
-			forwarded.Set(name, v)
+		// Every value, not the first: an HTTP/2 client may split Cookie
+		// across several fields, and Get would keep only one of them.
+		for _, v := range r.Header.Values(name) {
+			forwarded.Add(name, v)
 		}
 	}
 
@@ -536,6 +547,16 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if call.Calls != nil {
 		if len(call.Calls) == 0 {
 			writeReply(w, http.StatusBadRequest, callReply{Error: "a batch needs a non-empty \"calls\" list"})
+
+			return
+		}
+
+		// Each call is a goroutine and, often, a database query. The renderer
+		// never sends more than MaxBatch; a body that does is not from it.
+		if len(call.Calls) > MaxBatch {
+			writeReply(w, http.StatusRequestEntityTooLarge, callReply{
+				Error: fmt.Sprintf("a batch carries at most %d calls, this one %d", MaxBatch, len(call.Calls)),
+			})
 
 			return
 		}
@@ -571,10 +592,7 @@ func (h *CallbackHandler) serveBatch(ctx context.Context, w http.ResponseWriter,
 			defer wg.Done()
 
 			status, reply := h.dispatch(ctx, one)
-			line, err := json.Marshal(batchLine{Index: index, Status: status, callReply: reply})
-			if err != nil {
-				line, _ = json.Marshal(batchLine{Index: index, Status: http.StatusInternalServerError, callReply: callReply{Error: err.Error()}})
-			}
+			line := batchLineFor(index, status, reply)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -604,7 +622,7 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 	box := &revalidations{}
 	ctx = context.WithValue(ctx, revalidateKey, box)
 
-	result, err := h.call(ctx, fn, call.Args)
+	result, err := h.call(ctx, call.Function, fn, call.Args)
 	if err != nil {
 		return replyFor(err)
 	}
@@ -628,14 +646,33 @@ func replyFor(err error) (int, callReply) {
 
 	switch {
 	case errors.As(err, &invalid):
+		// An empty refusal still has to arrive as one. validationErrors is
+		// omitted when empty, and a bare 422 reads as a failed call.
+		if len(invalid.Errors) == 0 {
+			return http.StatusUnprocessableEntity, callReply{ValidationErrors: map[string][]string{"": {"The given data was invalid."}}}
+		}
+
 		return http.StatusUnprocessableEntity, callReply{ValidationErrors: invalid.Errors}
 	case errors.As(err, &noone):
 		return http.StatusUnauthorized, callReply{Unauthenticated: true, Error: noone.Message}
 	case errors.As(err, &mayNot):
 		return http.StatusForbidden, callReply{Unauthorized: true, Error: mayNot.Message}
 	case errors.As(err, &redirect):
+		// Nowhere to go is not a redirect. Answered as one it would be a 200
+		// with an empty body - a successful null - and a refusal would read as
+		// the call succeeding: Redirect(r.URL.Query().Get("next")) with no next.
+		if redirect.Location == "" {
+			return http.StatusInternalServerError, callReply{Error: "redirect with no location"}
+		}
+
 		return http.StatusOK, callReply{Redirect: redirect.Location, RedirectStatus: redirect.Status}
 	case errors.As(err, &refused):
+		// A refusal is a 4xx or a 5xx. Anything else - Refuse(0, ...) -
+		// would reach WriteHeader and panic, losing the reason.
+		if refused.Status < 400 || refused.Status > 599 {
+			return http.StatusInternalServerError, callReply{Error: fmt.Sprintf("refused with %d, which is not a refusal status: %s", refused.Status, refused.Message)}
+		}
+
 		return refused.Status, callReply{Error: refused.Message, RefusalStatus: refused.Status}
 	}
 
@@ -647,9 +684,12 @@ func replyFor(err error) (int, callReply) {
 // A panicking host function would otherwise take down the whole server, and
 // with it every other render in flight — for what is, from the renderer's
 // point of view, one component failing to fetch.
-func (h *CallbackHandler) call(ctx context.Context, fn Func, args Args) (result any, err error) {
+func (h *CallbackHandler) call(ctx context.Context, name string, fn Func, args Args) (result any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			// Logged here, with the stack: the renderer is told only that it
+			// panicked, and without this nobody could find out where.
+			logf("rsckit: host function %q panicked: %v\n%s", name, r, debug.Stack())
 			err = fmt.Errorf("host function panicked: %v", r)
 		}
 	}()
@@ -657,8 +697,58 @@ func (h *CallbackHandler) call(ctx context.Context, fn Func, args Args) (result 
 	return fn(ctx, args)
 }
 
+// MaxBatch is the most calls one batch may carry - the renderer's own limit.
+const MaxBatch = 50
+
+// marshal encodes v, turning a failure - an error, or a panic in a result's
+// own MarshalJSON - into an error. encoding/json re-panics what it did not
+// raise itself, and in a batch that happens on a goroutine net/http never
+// started: nothing would recover it, and the whole server would go down.
+func marshal(v any) (out []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("encoding the result panicked: %v", r)
+		}
+	}()
+
+	return json.Marshal(v)
+}
+
+// batchLineFor is one batch answer, always a line: a result that cannot be
+// encoded is that call's 500, not the end of the batch or the process.
+func batchLineFor(index, status int, reply callReply) []byte {
+	line, err := marshal(batchLine{Index: index, Status: status, callReply: reply})
+	if err != nil {
+		logf("rsckit: batch call %d: %v", index, err)
+		line, _ = json.Marshal(batchLine{Index: index, Status: http.StatusInternalServerError, callReply: callReply{Error: err.Error()}})
+	}
+
+	return line
+}
+
+// writeReply encodes before it writes the status. Encoding after meant a
+// result that could not be encoded - a NaN, say - went out as a 200 with an
+// empty body, and the reason with it went nowhere.
 func writeReply(w http.ResponseWriter, status int, reply callReply) {
+	body, err := marshal(reply)
+	if err != nil {
+		logf("rsckit: %v", err)
+		status = http.StatusInternalServerError
+		body, _ = json.Marshal(callReply{Error: err.Error()})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(reply)
+	_, _ = w.Write(append(body, '\n'))
+}
+
+// Logger receives what the adapter could not answer with: a panic in a host
+// function, with its stack, and a result that would not encode. Defaults to
+// the standard logger; set it to route these elsewhere.
+var Logger = log.Printf
+
+func logf(format string, args ...any) {
+	if Logger != nil {
+		Logger(format, args...)
+	}
 }

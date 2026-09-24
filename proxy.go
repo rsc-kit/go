@@ -40,8 +40,26 @@ func NewRenderer(target string) (*Renderer, error) {
 		return nil, errors.New("rsckit: renderer target needs an http(s) scheme")
 	}
 
-	return newRenderer(u, nil), nil
+	// Not http.DefaultTransport: it keeps two idle connections per host, and a
+	// render holds its connection for the length of the stream, so concurrent
+	// page loads churned new loopback connections.
+	return newRenderer(u, &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: RendererHeaderTimeout,
+	}), nil
 }
+
+// RendererHeaderTimeout is how long the proxy waits for the renderer to
+// start answering. The shell streams early, so this bounds a renderer that is
+// hung rather than one that is slow - without it, each such request held a
+// goroutine until the visitor gave up.
+var RendererHeaderTimeout = 60 * time.Second
 
 // NewUnixRenderer proxies to a renderer listening on a unix socket.
 //
@@ -63,9 +81,10 @@ func NewUnixRenderer(socketPath string) (*Renderer, error) {
 		// A render holds its connection for the length of the stream, so the
 		// pool has to be big enough for concurrent page loads rather than the
 		// default's assumption of short requests.
-		MaxIdleConns:        64,
-		MaxIdleConnsPerHost: 64,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   64,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: RendererHeaderTimeout,
 	}), nil
 }
 
@@ -93,9 +112,11 @@ func newRenderer(target *url.URL, transport http.RoundTripper) *Renderer {
 		FlushInterval: -1,
 		Transport:     transport,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			// A renderer that is down is a 502, not a panic. Say which side
-			// failed: the alternative is a bare 502 that reads as the app's.
-			http.Error(w, "rsc renderer unreachable: "+err.Error(), http.StatusBadGateway)
+			// A renderer that is down is a 502, not a panic. The visitor is
+			// told which side failed; the log is told why. The error names
+			// socket paths and addresses, which are not the visitor's.
+			logf("rsckit: renderer unreachable: %v", err)
+			http.Error(w, "rsc renderer unreachable", http.StatusBadGateway)
 		},
 	}
 
