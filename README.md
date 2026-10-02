@@ -194,6 +194,20 @@ The renderer can face the internet and forward what it does not own to
 callback path to the endpoint and everything else to it, and both honour the
 markers that keep a url neither side owns from bouncing between them.
 
+## Conformance
+
+`cmd/conformance` serves the functions rsc-kit's conformance suite calls,
+written with this package's ordinary API, and CI runs the suite against it on
+every change: empty lists, times, every refusal, not-found, redirects,
+revalidation, batches, guards and the secret, with each value checked against
+the type the manifest declares. To run it locally:
+
+```sh
+go run ./cmd/conformance -manifest /tmp/rsc-host.json &
+npx -y -p @rsc-kit/core rsc-kit-conformance \
+  --endpoint http://127.0.0.1:8123/__rsc/host-call --secret test --manifest /tmp/rsc-host.json
+```
+
 ## Tests
 
 `go test ./...` covers the contract from this side. The end-to-end proof — a
