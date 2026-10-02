@@ -100,6 +100,10 @@ type Registry struct {
 	fns     map[string]Func
 	guards  map[string]Guard
 	actions map[string]string
+	// sigs are the types of what Handle registered; typeDefs the named
+	// struct types they refer to.
+	sigs     map[string]Signature
+	typeDefs *defs
 }
 
 // NewRegistry returns an empty registry.
@@ -108,6 +112,7 @@ func NewRegistry() *Registry {
 		fns:     make(map[string]Func),
 		guards:  make(map[string]Guard),
 		actions: make(map[string]string),
+		sigs:    make(map[string]Signature),
 	}
 }
 
@@ -152,6 +157,13 @@ type Manifest struct {
 	// Functions is every name rpc() may call, sorted; the build turns it
 	// into a type, so a misspelt name fails the typecheck.
 	Functions []string `json:"functions"`
+	// Types are the signatures of the functions registered with Handle, by
+	// name; the build types rpc() and the action stubs from them. A function
+	// registered with Register has none and stays untyped.
+	Types map[string]Signature `json:"types,omitempty"`
+	// Defs are the named struct types those signatures refer to, by
+	// "$ref": "#/defs/Name". One TypeScript interface each.
+	Defs map[string]Schema `json:"defs,omitempty"`
 }
 
 // Manifest lists what this registry offers the app.
@@ -161,9 +173,24 @@ func (r *Registry) Manifest() Manifest {
 	for js, name := range r.actions {
 		actions[js] = name
 	}
+	var types map[string]Signature
+	if len(r.sigs) > 0 {
+		types = make(map[string]Signature, len(r.sigs))
+		for name, sig := range r.sigs {
+			types[name] = sig
+		}
+	}
+
+	var named map[string]Schema
+	if r.typeDefs != nil && len(r.typeDefs.schemas) > 0 {
+		named = make(map[string]Schema, len(r.typeDefs.schemas))
+		for name, schema := range r.typeDefs.schemas {
+			named[name] = schema
+		}
+	}
 	r.mu.RUnlock()
 
-	return Manifest{Actions: actions, Functions: r.Names()}
+	return Manifest{Actions: actions, Functions: r.Names(), Types: types, Defs: named}
 }
 
 // WriteManifest writes rsc-host.json where the build looks for it - the

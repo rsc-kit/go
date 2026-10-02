@@ -15,12 +15,9 @@ action the browser calls is a Go function the build wrote a stub for.
 ```go
 reg := rsckit.NewRegistry()
 
-reg.Register("Orders.recent", func(ctx context.Context, args rsckit.Args) (any, error) {
-    var limit int
-    if err := args.Bind(&limit); err != nil {
-        return nil, err
-    }
-
+// A plain Go function. Its parameter and result types are written to
+// rsc-host.json, so the app's rpc('Orders.recent', 5) is typed as []Order.
+reg.Handle("Orders.recent", func(ctx context.Context, limit int) ([]Order, error) {
     // The visitor's own cookie, forwarded from the page request — so this
     // query runs as them, not as nobody.
     session := rsckit.HeadersFrom(ctx).Get("Cookie")
@@ -119,12 +116,28 @@ the first refusal. A name nothing is registered for is a refusal, not a pass:
 a declared check that silently does not happen is the failure this exists to
 prevent.
 
+## Typed functions
+
+`Handle` and `HandleAction` take an ordinary Go function: any number of
+parameters of any type JSON can carry, bound from `rpc()`'s arguments in
+order, with an optional leading `context.Context`. A trailing pointer may be
+left out by the caller; a variadic parameter takes the rest. It returns a
+value and an error, only an error, or only a value.
+
+The parameter and result types go into `rsc-host.json` as JSON Schema, and
+the build turns them into TypeScript: each struct an interface named for its
+Go type, by its `json` tags. `Register` and `RegisterAction` keep the untyped
+`func(ctx, rsckit.Args) (any, error)` form.
+
 ## Server actions
 
 ```go
-reg.RegisterAction("ordersCancel", "Orders.cancel", cancel)
+reg.HandleAction("ordersCancel", "Orders.cancel", func(ctx context.Context, id int) error { … })
 reg.WriteManifest("rsc-host.json")
 ```
+
+A form can post to an action directly; its fields arrive as the first
+parameter, decoded into the struct.
 
 `rsc-host.json` lists the actions and every registered function. The build
 writes `server-actions.generated.ts` beside the app, exporting `ordersCancel`;
