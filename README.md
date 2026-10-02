@@ -126,7 +126,9 @@ value and an error, only an error, or only a value.
 
 The parameter and result types go into `rsc-host.json` as JSON Schema, and
 the build turns them into TypeScript: each struct an interface named for its
-Go type, by its `json` tags. `Register` and `RegisterAction` keep the untyped
+Go type, by its `json` tags. A nil slice or map in a typed function's result
+is sent as `[]` or `{}`, as its type says, never `null`; a nil pointer is
+`null`. `Register` and `RegisterAction` keep the untyped
 `func(ctx, rsckit.Args) (any, error)` form.
 
 ## Server actions
