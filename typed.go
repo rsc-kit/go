@@ -205,6 +205,13 @@ type defs struct {
 }
 
 func (d *defs) of(t reflect.Type) Schema {
+	// A pointer is its element or null, decided before asking what the type
+	// marshals as: *time.Time has time.Time's MarshalJSON too, and was read
+	// as a type whose shape is its own - unknown, where it is a string or null.
+	if t.Kind() == reflect.Pointer {
+		return Schema{"anyOf": []any{d.of(t.Elem()), Schema{"type": "null"}}}
+	}
+
 	if t == timeType {
 		return Schema{"type": "string", "format": "date-time"}
 	}
@@ -232,8 +239,6 @@ func (d *defs) of(t reflect.Type) Schema {
 		return Schema{"type": "number"}
 	case reflect.String:
 		return Schema{"type": "string"}
-	case reflect.Pointer:
-		return Schema{"anyOf": []any{d.of(t.Elem()), Schema{"type": "null"}}}
 	case reflect.Slice, reflect.Array:
 		// []byte is base64 text on the wire.
 		if t.Elem().Kind() == reflect.Uint8 {
