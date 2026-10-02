@@ -33,6 +33,9 @@ reg.Middleware("auth", func(ctx context.Context, _ string) error {
 })
 
 callback, err := rsckit.NewCallbackHandler(reg, os.Getenv("RSC_HOST_CALL_SECRET"))
+if err != nil {
+    log.Fatal(err) // refuses to exist without a secret
+}
 http.Handle("POST /__rsc/host-call", callback)
 
 // The package never builds a server, so its timeouts are yours. Without
@@ -46,8 +49,10 @@ server := &http.Server{
 log.Fatal(server.ListenAndServe())
 ```
 
-The JavaScript side is what `bun create rsc-kit` writes, plus two lines in
-`.env`:
+The JavaScript side is what `bunx rsc-kit@latest init` writes in the
+directory with `go.mod` (or `bun create rsc-kit@latest my-app
+--backend=http://127.0.0.1:8080` for a new app): the route tree,
+`vite.config.ts`, the scripts, and two lines in `.env`:
 
 ```ini
 RSC_BACKEND=http://127.0.0.1:8080
@@ -66,7 +71,7 @@ it: partial-navigation depth arithmetic, redirect delivery, cookie forwarding,
 prerendered variants, PPR. `@rsc-kit/core` already implements all of that, so
 this adapter does not. What a backend implements is one endpoint, and the
 contract is written down at
-[rsc-kit.dev/hosts/your-own-backend](https://rsc-kit.dev/hosts/your-own-backend).
+[docs.rsc-kit.dev/hosts/your-own-backend](https://docs.rsc-kit.dev/hosts/your-own-backend).
 
 What it costs: a JS process alongside the Go binary. If you want one static
 artifact, that is only reachable when every route is prerendered — then the
@@ -80,9 +85,11 @@ refuses to be built without a shared secret, and checks it in constant time.
 Restrict the path at the web server as well, or mount it on a separate
 listener bound to loopback.
 
-**Register at startup, once.** `Register` and `Middleware` panic on a
-duplicate name rather than overwriting. A silent overwrite survives a refactor
-and then answers the wrong query.
+**Register at startup, once.** `Handle`, `Register`, their action forms and
+`Middleware` panic on a duplicate name rather than overwriting. A silent
+overwrite survives a refactor and then answers the wrong query. `Handle` also
+panics on a value that is not a function it can call, and `Register` on the
+reserved `__rsc.middleware`.
 
 ## What a function can answer
 
@@ -100,6 +107,12 @@ told what happened, rather than handed a 500:
 
 Wrapped errors still answer as what they are: `errors.As` finds the refusal
 inside `fmt.Errorf("…: %w", err)`.
+
+In development, set `Debug` on the `CallbackHandler`, or run with
+`RSC_DEBUG=1`, and a 500 also carries where in Go it failed: the error's type,
+and for a panic the frames it unwound. The renderer shows them under its own
+stack as the error's cause. Never in production: a trace names your files.
+A refusal never carries one.
 
 ## Route middleware
 
@@ -126,9 +139,11 @@ value and an error, only an error, or only a value.
 
 The parameter and result types go into `rsc-host.json` as JSON Schema, and
 the build turns them into TypeScript: each struct an interface named for its
-Go type, by its `json` tags. A nil slice or map in a typed function's result
-is sent as `[]` or `{}`, as its type says, never `null`; a nil pointer is
-`null`. `Register` and `RegisterAction` keep the untyped
+Go type, by its `json` tags. `omitempty` is optional, a pointer is `| null`,
+`time.Time` is a date-time string and `*time.Time` a string or `null`; a type
+with its own `MarshalJSON` is `unknown`, since its shape is its own. A nil
+slice or map in a typed function's result is sent as `[]` or `{}`, as its type
+says, never `null`; a nil pointer is `null`. `Register` and `RegisterAction` keep the untyped
 `func(ctx, rsckit.Args) (any, error)` form.
 
 ## Server actions
@@ -141,7 +156,8 @@ reg.WriteManifest("rsc-host.json")
 A form can post to an action directly; its fields arrive as the first
 parameter, decoded into the struct.
 
-`rsc-host.json` lists the actions and every registered function. The build
+`rsc-host.json` has `actions`, `functions`, and the `types` and `defs` of
+what `Handle` registered. The build
 writes `server-actions.generated.ts` beside the app, exporting `ordersCancel`;
 a client component imports and calls it, and the call arrives here as
 `Orders.cancel`. The function names become the type of `rpc()`'s first
@@ -151,7 +167,13 @@ Have the build write it, so it cannot go stale. Give your binary a flag that
 writes the manifest and exits, and name it in the Vite config:
 
 ```ts
-rscKit({ hostManifest: { command: ['go', 'run', './backend', '-manifest', '../rsc-host.json'] } })
+rscKit({
+  hostManifest: {
+    command: ['go', 'run', '.', '-manifest', '../rsc-host.json'],
+    cwd: 'backend',      // where the command runs; default the project root
+    watch: ['backend'],  // dev runs it again when the Go source changes
+  },
+})
 ```
 
 It runs as `vite` and `vite build` start. A build fails if it fails; dev
@@ -190,7 +212,8 @@ limit; a larger one is refused with 413.
 
 The renderer can face the internet and forward what it does not own to
 `RSC_BACKEND` — a Go route, a webhook, an upload. Or Go faces it:
-`NewRenderer(url)` is a streaming reverse proxy, `NewHandler` routes the
+`NewRenderer(url)` is a streaming reverse proxy (`NewUnixRenderer(path)` for
+a renderer on a unix socket), `NewHandler(renderer, callback, path)` routes the
 callback path to the endpoint and everything else to it, and both honour the
 markers that keep a url neither side owns from bouncing between them.
 
@@ -218,4 +241,4 @@ which build a host server on this module, run it and render against it. A
 contract change is released here first, and the engine's fixture follows.
 
 Guides, the contract every backend answers, and a runnable example at
-[rsc-kit.dev/hosts/go](https://rsc-kit.dev/hosts/go).
+[docs.rsc-kit.dev/hosts/go](https://docs.rsc-kit.dev/hosts/go).
