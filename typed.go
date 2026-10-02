@@ -181,13 +181,13 @@ func typedFunc(name string, fn any, d *defs) (Func, Signature) {
 		case t.NumOut() == 2:
 			err, _ := out[1].Interface().(error)
 
-			return out[0].Interface(), err
+			return emptyNotNil(out[0]).Interface(), err
 		case t.NumOut() == 1 && t.Out(0) == errorType:
 			err, _ := out[0].Interface().(error)
 
 			return nil, err
 		case t.NumOut() == 1:
-			return out[0].Interface(), nil
+			return emptyNotNil(out[0]).Interface(), nil
 		default:
 			return nil, nil
 		}
@@ -334,4 +334,84 @@ func exported(s string) string {
 	}
 
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// emptyNotNil returns v with every nil slice made empty and every nil map
+// made an empty map, at any depth.
+//
+// encoding/json writes a nil slice as null, and Go code returns one for "no
+// rows" all the time - var out []Order, append nothing, return it. The
+// schema says array, the TypeScript says Order[], and the page's .map threw
+// on null. So a typed function's result keeps the promise its type makes.
+// A nil pointer is left nil: it is typed as T | null.
+//
+// The value is copied, never changed in place, and only where something was
+// nil; a pointer seen twice is not followed twice, so a cycle ends.
+func emptyNotNil(v reflect.Value) reflect.Value {
+	return fillEmpty(v, map[uintptr]bool{})
+}
+
+func fillEmpty(v reflect.Value, seen map[uintptr]bool) reflect.Value {
+	switch v.Kind() {
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.MakeSlice(v.Type(), 0, 0)
+		}
+
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return v
+		}
+
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(fillEmpty(v.Index(i), seen))
+		}
+
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.MakeMap(v.Type())
+		}
+
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for _, key := range v.MapKeys() {
+			out.SetMapIndex(key, fillEmpty(v.MapIndex(key), seen))
+		}
+
+		return out
+	case reflect.Pointer:
+		if v.IsNil() || seen[v.Pointer()] {
+			return v
+		}
+
+		seen[v.Pointer()] = true
+
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(fillEmpty(v.Elem(), seen))
+
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+
+		for i := 0; i < v.NumField(); i++ {
+			if field := out.Field(i); field.CanSet() {
+				field.Set(fillEmpty(v.Field(i), seen))
+			}
+		}
+
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+
+		inner := fillEmpty(v.Elem(), seen)
+		out := reflect.New(v.Type()).Elem()
+		out.Set(inner)
+
+		return out
+	default:
+		return v
+	}
 }

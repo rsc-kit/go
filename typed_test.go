@@ -51,6 +51,39 @@ func TestAPointerToTimeIsAStringOrNull(t *testing.T) {
 	}
 }
 
+type tPage struct {
+	Rows  []tLine           `json:"rows"`
+	Tags  map[string]string `json:"tags"`
+	Next  *tPage            `json:"next"`
+	Lines [][]tLine         `json:"lines"`
+}
+
+func TestANilSliceOrMapIsSentEmptyNotNull(t *testing.T) {
+	// "No rows" in Go is usually a nil slice, which encoding/json writes as
+	// null - and the TypeScript said Order[], so the page's .map threw.
+	reg := NewRegistry()
+	reg.Handle("Orders.none", func() ([]tOrder, error) {
+		var none []tOrder
+		return none, nil
+	})
+	reg.Handle("Pages.first", func() (tPage, error) {
+		return tPage{Lines: [][]tLine{nil}, Next: &tPage{}}, nil
+	})
+
+	got, _ := call(t, reg, "Orders.none", Args{})
+	if raw, _ := json.Marshal(got); string(raw) != "[]" {
+		t.Fatalf("Orders.none = %s", raw)
+	}
+
+	got, _ = call(t, reg, "Pages.first", Args{})
+	raw, _ := json.Marshal(got)
+	want := `{"rows":[],"tags":{},"next":{"rows":[],"tags":{},"next":null,"lines":[]},"lines":[[]]}`
+
+	if string(raw) != want {
+		t.Fatalf("Pages.first = %s", raw)
+	}
+}
+
 type tLine struct {
 	SKU string `json:"sku"`
 	Qty int    `json:"qty"`
