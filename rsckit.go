@@ -30,6 +30,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -386,6 +387,15 @@ type callReply struct {
 	Redirect         string              `json:"redirect,omitempty"`
 	RedirectStatus   int                 `json:"redirectStatus,omitempty"`
 	RefusalStatus    int                 `json:"refusalStatus,omitempty"`
+	// Debug says where an unexpected failure happened, for the renderer to
+	// show beside its own stack. Only when the handler's Debug is on.
+	Debug *debugInfo `json:"debug,omitempty"`
+}
+
+type debugInfo struct {
+	Type    string   `json:"type"`
+	Message string   `json:"message"`
+	Trace   []string `json:"trace"`
 }
 
 // ValidationError refuses the input, naming the fields and what is wrong with
@@ -519,6 +529,13 @@ type CallbackHandler struct {
 	// ForwardHeaders are copied from the call onto the context a function
 	// sees. Defaults to cookie and authorization, matching the JS side.
 	ForwardHeaders []string
+
+	// Debug sends where an unexpected failure happened with its answer: the
+	// error's type, and for a panic the frames it unwound, so the renderer's
+	// error points at the Go that failed rather than only at the rpc() call.
+	// Development only - a trace names files and functions. Defaults to
+	// RSC_DEBUG=1 in the environment.
+	Debug bool
 }
 
 // NewCallbackHandler builds the endpoint the renderer calls back into.
@@ -531,6 +548,7 @@ func NewCallbackHandler(registry *Registry, secret string) (*CallbackHandler, er
 		registry:       registry,
 		secret:         []byte(secret),
 		ForwardHeaders: []string{"Cookie", "Authorization"},
+		Debug:          os.Getenv("RSC_DEBUG") == "1",
 	}, nil
 }
 
@@ -658,7 +676,15 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 
 	result, err := h.call(ctx, call.Function, fn, call.Args)
 	if err != nil {
-		return replyFor(err)
+		status, reply := replyFor(err)
+
+		// A refusal is an answer and needs no trace; a failure is a bug,
+		// and its whereabouts are the whole of the next step.
+		if status == http.StatusInternalServerError && h.Debug {
+			reply.Debug = debugFor(call.Function, err)
+		}
+
+		return status, reply
 	}
 
 	return http.StatusOK, callReply{Result: result, Revalidate: box.all()}
@@ -724,7 +750,7 @@ func (h *CallbackHandler) call(ctx context.Context, name string, fn Func, args A
 			// Logged here, with the stack: the renderer is told only that it
 			// panicked, and without this nobody could find out where.
 			logf("rsckit: host function %q panicked: %v\n%s", name, r, debug.Stack())
-			err = fmt.Errorf("host function panicked: %v", r)
+			err = &panicked{value: r, frames: framesHere()}
 		}
 	}()
 
@@ -785,4 +811,59 @@ func logf(format string, args ...any) {
 	if Logger != nil {
 		Logger(format, args...)
 	}
+}
+
+// panicked is a recovered panic, with the frames it unwound.
+type panicked struct {
+	value  any
+	frames []string
+}
+
+func (p *panicked) Error() string { return fmt.Sprintf("host function panicked: %v", p.value) }
+
+// framesHere lists the stack from where a deferred recover runs: the panic
+// site and what called it, without the runtime's own frames.
+func framesHere() []string {
+	pcs := make([]uintptr, 48)
+	n := runtime.Callers(3, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+
+	var out []string
+
+	for {
+		frame, more := frames.Next()
+
+		if !strings.HasPrefix(frame.Function, "runtime.") {
+			out = append(out, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, frame.Function))
+		}
+
+		if !more {
+			break
+		}
+	}
+
+	return out
+}
+
+// debugFor describes a failure for the renderer: a panic by its frames, an
+// error by the chain it wraps - Go errors carry no stack, so the wrapping
+// ("loading orders: query: connection refused") is the trace there is.
+func debugFor(function string, err error) *debugInfo {
+	info := &debugInfo{Type: fmt.Sprintf("%T", err), Message: err.Error()}
+
+	var p *panicked
+	if errors.As(err, &p) {
+		info.Type = fmt.Sprintf("panic(%T)", p.value)
+		info.Trace = p.frames
+
+		return info
+	}
+
+	info.Trace = []string{"in host function " + function}
+
+	for e := errors.Unwrap(err); e != nil; e = errors.Unwrap(e) {
+		info.Trace = append(info.Trace, fmt.Sprintf("wrapping %T: %v", e, e))
+	}
+
+	return info
 }
