@@ -123,14 +123,24 @@ prevent.
 
 ```go
 reg.RegisterAction("ordersCancel", "Orders.cancel", cancel)
-reg.WriteActionManifest("rsc-host-actions.json") // before each build
+reg.WriteManifest("rsc-host.json")
 ```
 
-The build reads the manifest and writes `server-actions.generated.ts` beside
-the app, exporting `ordersCancel`; a client component imports and calls it,
-and the call arrives here as `Orders.cancel`. Write the file as part of the
-build rather than by hand — a stale map names a function that has since been
-renamed, and nothing fails until the browser calls it.
+`rsc-host.json` lists the actions and every registered function. The build
+writes `server-actions.generated.ts` beside the app, exporting `ordersCancel`;
+a client component imports and calls it, and the call arrives here as
+`Orders.cancel`. The function names become the type of `rpc()`'s first
+argument, so `rpc('Orders.recnet')` fails the typecheck.
+
+Have the build write it, so it cannot go stale. Give your binary a flag that
+writes the manifest and exits, and name it in the Vite config:
+
+```ts
+rscKit({ hostManifest: { command: ['go', 'run', './backend', '-manifest', '../rsc-host.json'] } })
+```
+
+It runs as `vite` and `vite build` start. A build fails if it fails; dev
+reports it and uses the file already there.
 
 `rsckit.Revalidate(ctx, "orders")` inside an action marks a region stale, so
 the answer carries it re-rendered instead of the browser being told to ask

@@ -128,9 +128,9 @@ func (r *Registry) Middleware(name string, guard Guard) {
 // RegisterAction registers a function the browser may call as a server
 // action, under jsName in the app's code.
 //
-// The build reads the map from rsc-host-actions.json and writes a "use server"
-// module exporting jsName; a client component imports it and calls it, and
-// the call arrives here under name. WriteActionManifest writes that file.
+// The build reads it from rsc-host.json and writes a "use server" module
+// exporting jsName; a client component imports it and calls it, and the call
+// arrives here under name. WriteManifest writes that file.
 func (r *Registry) RegisterAction(jsName, name string, fn Func) {
 	r.Register(name, fn)
 
@@ -144,29 +144,37 @@ func (r *Registry) RegisterAction(jsName, name string, fn Func) {
 	r.actions[jsName] = name
 }
 
-// ActionManifest is what the build reads: the JavaScript name of each action
-// to the name it is registered under here.
-func (r *Registry) ActionManifest() map[string]string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	out := make(map[string]string, len(r.actions))
-	for js, name := range r.actions {
-		out[js] = name
-	}
-
-	return out
+// Manifest is what the build reads from rsc-host.json.
+type Manifest struct {
+	// Actions maps each action's JavaScript name to the name it is
+	// registered under; the build writes a "use server" stub for each.
+	Actions map[string]string `json:"actions"`
+	// Functions is every name rpc() may call, sorted; the build turns it
+	// into a type, so a misspelt name fails the typecheck.
+	Functions []string `json:"functions"`
 }
 
-// WriteActionManifest writes rsc-host-actions.json where the build looks for
-// it - the project root, beside vite.config.ts.
+// Manifest lists what this registry offers the app.
+func (r *Registry) Manifest() Manifest {
+	r.mu.RLock()
+	actions := make(map[string]string, len(r.actions))
+	for js, name := range r.actions {
+		actions[js] = name
+	}
+	r.mu.RUnlock()
+
+	return Manifest{Actions: actions, Functions: r.Names()}
+}
+
+// WriteManifest writes rsc-host.json where the build looks for it - the
+// project root, beside vite.config.ts.
 //
-// Run it before each build rather than by hand: a stale map names a function
-// that has since been renamed, and nothing fails until the browser calls it.
-// A registry with no actions writes an empty object, so a removed action
-// disappears from the generated module rather than lingering.
-func (r *Registry) WriteActionManifest(path string) error {
-	data, err := json.MarshalIndent(r.ActionManifest(), "", "  ")
+// Run it before each build and dev start - rscKit({ hostManifest }) does - so
+// it cannot go stale: a stale one names a function since renamed, and nothing
+// fails until the browser calls it. A registry with no actions writes an
+// empty object, so a removed action disappears from the generated module.
+func (r *Registry) WriteManifest(path string) error {
+	data, err := json.MarshalIndent(r.Manifest(), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -242,8 +250,7 @@ func (r *Registry) Register(name string, fn Func) {
 	r.fns[name] = fn
 }
 
-// Names lists what is registered, for the build's RSC_HOST_ACTIONS and for
-// diagnostics.
+// Names lists what is registered, sorted: the manifest's functions.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

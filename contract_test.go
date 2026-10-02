@@ -200,36 +200,54 @@ func TestTheReservedNameCannotBeRegisteredAsAFunction(t *testing.T) {
 	NewRegistry().Register(MiddlewareFunction, func(context.Context, Args) (any, error) { return true, nil })
 }
 
-// The build reads rsc-host-actions.json and writes a "use server" module from
-// it; this is the Go side of that handoff.
-func TestTheActionManifestIsWhatTheBuildReads(t *testing.T) {
+// The build reads rsc-host.json: stubs for the actions, and a type of every
+// name rpc() may call. This is the Go side of that handoff.
+func TestTheManifestIsWhatTheBuildReads(t *testing.T) {
 	reg := NewRegistry()
 	reg.RegisterAction("ordersCancel", "Orders.cancel", func(context.Context, Args) (any, error) { return nil, nil })
 	reg.RegisterAction("profileUpdate", "Profile.update", func(context.Context, Args) (any, error) { return nil, nil })
 	reg.Register("Orders.recent", func(context.Context, Args) (any, error) { return nil, nil })
 
-	path := filepath.Join(t.TempDir(), "rsc-host-actions.json")
-	if err := reg.WriteActionManifest(path); err != nil {
+	path := filepath.Join(t.TempDir(), "rsc-host.json")
+	if err := reg.WriteManifest(path); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	raw, _ := os.ReadFile(path)
 
-	var manifest map[string]string
+	var manifest struct {
+		Actions   map[string]string `json:"actions"`
+		Functions []string          `json:"functions"`
+	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %s", raw)
 	}
 
-	// Actions only. A read a server component calls is not something the
-	// browser should be handed a stub for.
+	// Actions only in the stubs. A read a server component calls is not
+	// something the browser should be handed a stub for.
 	want := map[string]string{"ordersCancel": "Orders.cancel", "profileUpdate": "Profile.update"}
-	if len(manifest) != len(want) || manifest["ordersCancel"] != want["ordersCancel"] || manifest["profileUpdate"] != want["profileUpdate"] {
-		t.Fatalf("manifest = %v, want %v", manifest, want)
+	if len(manifest.Actions) != len(want) || manifest.Actions["ordersCancel"] != want["ordersCancel"] || manifest.Actions["profileUpdate"] != want["profileUpdate"] {
+		t.Fatalf("actions = %v, want %v", manifest.Actions, want)
 	}
 
-	// And the action is callable under its registered name.
-	if _, ok := reg.lookup("Orders.cancel"); !ok {
-		t.Fatal("the action was not registered as a function")
+	// Every function, actions included, sorted.
+	functions := strings.Join(manifest.Functions, ",")
+	if functions != "Orders.cancel,Orders.recent,Profile.update" {
+		t.Fatalf("functions = %s", functions)
+	}
+}
+
+// An empty registry still writes a map and a list, never null: the build
+// reads an object of actions.
+func TestAnEmptyManifestIsObjectAndList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rsc-host.json")
+	if err := NewRegistry().WriteManifest(path); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	raw, _ := os.ReadFile(path)
+	if got := strings.Join(strings.Fields(string(raw)), ""); got != `{"actions":{},"functions":[]}` {
+		t.Fatalf("manifest = %s", got)
 	}
 }
 
