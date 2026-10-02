@@ -23,6 +23,34 @@ type tOrder struct {
 	private string    //nolint:unused
 }
 
+type tBuild struct {
+	StartedAt  *time.Time `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt"`
+}
+
+func TestAPointerToTimeIsAStringOrNull(t *testing.T) {
+	// *time.Time has time.Time's MarshalJSON, and was read as a type that
+	// writes its own shape: unknown, on every optional timestamp.
+	reg := NewRegistry()
+	reg.Handle("Builds.find", func(id int) (tBuild, error) { return tBuild{}, nil })
+
+	raw, _ := json.Marshal(reg.Manifest().Defs["tBuild"]["properties"])
+
+	var props map[string]any
+	_ = json.Unmarshal(raw, &props)
+
+	want := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string", "format": "date-time"},
+		map[string]any{"type": "null"},
+	}}
+
+	for _, name := range []string{"startedAt", "finishedAt"} {
+		if !reflect.DeepEqual(props[name], want) {
+			t.Fatalf("%s = %v", name, props[name])
+		}
+	}
+}
+
 type tLine struct {
 	SKU string `json:"sku"`
 	Qty int    `json:"qty"`
