@@ -49,28 +49,92 @@ type VersionStore interface {
 	Versions(ctx context.Context, names []string) (map[string]int64, error)
 }
 
+// KeepVersions is how long a name nobody changes is kept: what Prune deletes
+// by default, and what MemoryVersions forgets on its own.
+const KeepVersions = 30 * 24 * time.Hour
+
+// NextVersion is the version a name moves to: the larger of one past where
+// it was and the current time in milliseconds.
+//
+// A counter would do for "it moved", but a counter repeats once its row is
+// gone - deleted to keep the store small, a name starts again from 0 and
+// climbs back to a value some tab is still holding, and that tab misses the
+// change. A time never comes round again, so a name may be deleted at any
+// moment: a tab holding the old value sees a different one and refreshes
+// once. It is also when the name last changed, which is all cleanup needs.
+// Every store bumps with it; a writer doing + 1 still works, but is not safe
+// to prune.
+func NextVersion(current int64) int64 {
+	if now := time.Now().UnixMilli(); now > current+1 {
+		return now
+	}
+
+	return current + 1
+}
+
+func cutoff(olderThan time.Duration) int64 {
+	if olderThan <= 0 {
+		olderThan = KeepVersions
+	}
+
+	return time.Now().Add(-olderThan).UnixMilli()
+}
+
 // MemoryVersions keeps versions in this process: the default, right for one
-// instance and for tests.
+// instance and for tests. A name not changed in ForgetAfter (KeepVersions by
+// default) is forgotten, swept at most once an hour, so a process up for
+// months does not hold every name it ever saw.
 type MemoryVersions struct {
+	ForgetAfter time.Duration
+
 	mu       sync.Mutex
 	versions map[string]int64
+	swept    time.Time
 }
 
 // NewMemoryVersions returns an empty in-process store.
 func NewMemoryVersions() *MemoryVersions {
-	return &MemoryVersions{versions: make(map[string]int64)}
+	return &MemoryVersions{versions: make(map[string]int64), swept: time.Now()}
 }
 
-// Bump moves each name's version.
+// Bump moves each name's version to NextVersion.
 func (m *MemoryVersions) Bump(_ context.Context, names []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	forget := m.ForgetAfter
+	if forget <= 0 {
+		forget = KeepVersions
+	}
+
+	if every := min(forget, time.Hour); time.Since(m.swept) >= every {
+		m.prune(cutoff(forget))
+		m.swept = time.Now()
+	}
+
 	for _, name := range names {
-		m.versions[name]++
+		m.versions[name] = NextVersion(m.versions[name])
 	}
 
 	return nil
+}
+
+// Prune forgets every name not changed in olderThan (KeepVersions when 0).
+func (m *MemoryVersions) Prune(_ context.Context, olderThan time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.prune(cutoff(olderThan))
+
+	return nil
+}
+
+func (m *MemoryVersions) prune(before int64) {
+	for name, version := range m.versions {
+		if version < before {
+			delete(m.versions, name)
+		}
+	}
 }
 
 // Versions answers the current version of each name.
@@ -119,13 +183,18 @@ func (s *SQLVersions) table() string {
 	return "rsc_versions"
 }
 
-// Bump moves each name's version, creating the row the first time.
+// Bump moves each name's version to NextVersion, creating the row the first
+// time. CASE rather than GREATEST, which SQLite spells MAX; the time is this
+// process's, passed in, so the database's clock never has to agree.
 func (s *SQLVersions) Bump(ctx context.Context, names []string) error {
-	update := fmt.Sprintf("UPDATE %s SET version = version + 1 WHERE name = %s", s.table(), s.placeholder(1))
-	insert := fmt.Sprintf("INSERT INTO %s (name, version) VALUES (%s, 1)", s.table(), s.placeholder(1))
+	update := fmt.Sprintf("UPDATE %s SET version = CASE WHEN version + 1 > %s THEN version + 1 ELSE %s END WHERE name = %s",
+		s.table(), s.placeholder(1), s.placeholder(2), s.placeholder(3))
+	insert := fmt.Sprintf("INSERT INTO %s (name, version) VALUES (%s, %s)", s.table(), s.placeholder(1), s.placeholder(2))
 
 	for _, name := range names {
-		res, err := s.DB.ExecContext(ctx, update, name)
+		now := time.Now().UnixMilli()
+
+		res, err := s.DB.ExecContext(ctx, update, now, now, name)
 		if err != nil {
 			return err
 		}
@@ -135,14 +204,23 @@ func (s *SQLVersions) Bump(ctx context.Context, names []string) error {
 		}
 
 		// New: insert, and if another instance inserted it first, bump that.
-		if _, err := s.DB.ExecContext(ctx, insert, name); err != nil {
-			if _, retry := s.DB.ExecContext(ctx, update, name); retry != nil {
+		if _, err := s.DB.ExecContext(ctx, insert, name, now); err != nil {
+			if _, retry := s.DB.ExecContext(ctx, update, now, now, name); retry != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// Prune deletes every name not changed in olderThan (KeepVersions when 0).
+// Always safe: a version never comes round again, so a tab still holding a
+// pruned name sees it differ and refreshes once. Run it from a scheduled job.
+func (s *SQLVersions) Prune(ctx context.Context, olderThan time.Duration) error {
+	_, err := s.DB.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE version < %s", s.table(), s.placeholder(1)), cutoff(olderThan))
+
+	return err
 }
 
 // Versions answers the current version of each name; a name with no row is 0.
