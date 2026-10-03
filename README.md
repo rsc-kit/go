@@ -164,6 +164,19 @@ reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar})   // Postg
 Anything with a `Bump` and a `Versions` fits — Redis, a cache — and a store
 that can tell the moment a name moves can answer sooner than the poll.
 
+A version is when the name last changed, in milliseconds — `NextVersion`, the
+larger of one past the old value and now — so it never repeats, and old names
+can be deleted at any time: a tab still holding one refreshes once. Prune on a
+schedule, since a row is kept for every name that ever changed:
+
+```go
+store.Prune(ctx, 0) // names not changed in rsckit.KeepVersions (30 days); or any duration
+```
+
+`MemoryVersions` forgets old names on its own (`ForgetAfter`). A `VersionStore`
+of your own should bump with `rsckit.NextVersion`, not `+ 1`, before you prune
+it.
+
 ## Typed functions
 
 `Handle` and `HandleAction` take an ordinary Go function: any number of

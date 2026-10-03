@@ -60,7 +60,7 @@ func TestChangedMovesTheVersionAndOnlyWhatDiffersIsAnswered(t *testing.T) {
 	}
 
 	moved := askChanged(t, h, map[string]int64{"orders": 0, "stock": 0}, 0)
-	if moved["orders"] != 2 || len(moved) != 1 {
+	if moved["orders"] < time.Now().Add(-time.Minute).UnixMilli() || len(moved) != 1 {
 		t.Fatalf("got %v", moved)
 	}
 }
@@ -77,7 +77,7 @@ func TestAHeldAskIsAnsweredTheMomentANameMovesHere(t *testing.T) {
 	started := time.Now()
 	moved := askChanged(t, h, map[string]int64{"orders": 0}, 5_000)
 
-	if moved["orders"] != 1 {
+	if moved["orders"] <= 0 {
 		t.Fatalf("got %v", moved)
 	}
 	if time.Since(started) > time.Second {
@@ -101,7 +101,7 @@ func TestAHeldAskSeesAnotherInstanceMoveTheStore(t *testing.T) {
 	}()
 
 	moved := askChanged(t, h, map[string]int64{"orders": 0}, 2_000)
-	if moved["orders"] != 1 {
+	if moved["orders"] <= 0 {
 		t.Fatalf("got %v", moved)
 	}
 }
@@ -136,5 +136,70 @@ func TestChangedIsNotInTheManifest(t *testing.T) {
 		if name == ChangedFunction || name == MiddlewareFunction {
 			t.Fatalf("%q is the engine's, not the app's", name)
 		}
+	}
+}
+
+func TestNextVersionNeverRepeats(t *testing.T) {
+	before := time.Now().UnixMilli()
+
+	first := NextVersion(0)
+	if first < before {
+		t.Fatalf("a first version is now: got %d, before %d", first, before)
+	}
+
+	if second := NextVersion(first); second <= first {
+		t.Fatalf("a bump moves past where it was: %d then %d", first, second)
+	}
+
+	// A counter written by an older writer moves to the time.
+	if v := NextVersion(7); v < before {
+		t.Fatalf("a counter moves to now: got %d", v)
+	}
+
+	// A version ahead of the clock still moves.
+	ahead := time.Now().Add(time.Hour).UnixMilli()
+	if v := NextVersion(ahead); v != ahead+1 {
+		t.Fatalf("ahead of the clock: got %d, want %d", v, ahead+1)
+	}
+}
+
+func TestMemoryVersionsPruneOldNamesSafely(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryVersions()
+
+	_ = store.Bump(ctx, []string{"old", "fresh"})
+	held := time.Now().Add(-365 * 24 * time.Hour).UnixMilli()
+
+	store.mu.Lock()
+	store.versions["old"] = held
+	store.mu.Unlock()
+
+	if err := store.Prune(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	versions, _ := store.Versions(ctx, []string{"old", "fresh"})
+	if versions["old"] != 0 || versions["fresh"] == 0 {
+		t.Fatalf("got %v", versions)
+	}
+
+	// Changed again, it comes back past what a tab still holds, never at it.
+	_ = store.Bump(ctx, []string{"old"})
+	if versions, _ = store.Versions(ctx, []string{"old"}); versions["old"] <= held {
+		t.Fatalf("came back at %d, a tab holds %d", versions["old"], held)
+	}
+}
+
+func TestMemoryVersionsForgetOnTheirOwn(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryVersions()
+	store.ForgetAfter = 20 * time.Millisecond
+
+	_ = store.Bump(ctx, []string{"old"})
+	time.Sleep(40 * time.Millisecond)
+	_ = store.Bump(ctx, []string{"other"}) // a bump sweeps
+
+	if versions, _ := store.Versions(ctx, []string{"old"}); versions["old"] != 0 {
+		t.Fatalf("still remembered: %v", versions)
 	}
 }
