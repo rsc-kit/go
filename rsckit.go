@@ -105,6 +105,12 @@ type Registry struct {
 	// struct types they refer to.
 	sigs     map[string]Signature
 	typeDefs *defs
+
+	// Versions a page refreshes on - see changed.go. moved is closed by each
+	// Changed in this process, waking a ChangedFunction call being held.
+	versionsMu sync.Mutex
+	versions   VersionStore
+	moved      chan struct{}
 }
 
 // NewRegistry returns an empty registry.
@@ -271,6 +277,10 @@ func (r *Registry) Register(name string, fn Func) {
 		panic(fmt.Sprintf("rsckit: %q is reserved; register guards with Middleware", name))
 	}
 
+	if name == ChangedFunction {
+		panic(fmt.Sprintf("rsckit: %q is reserved; it is answered by the registry, and Changed moves a version", name))
+	}
+
 	if _, exists := r.fns[name]; exists {
 		panic(fmt.Sprintf("rsckit: host function %q registered twice", name))
 	}
@@ -296,6 +306,10 @@ func (r *Registry) Names() []string {
 func (r *Registry) lookup(name string) (Func, bool) {
 	if name == MiddlewareFunction {
 		return r.runGuards, true
+	}
+
+	if name == ChangedFunction {
+		return r.runChanged, true
 	}
 
 	r.mu.RLock()

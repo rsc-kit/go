@@ -129,6 +129,41 @@ the first refusal. A name nothing is registered for is a refusal, not a pass:
 a declared check that silently does not happen is the failure this exists to
 prevent.
 
+## Saying data changed
+
+A section that says what it refreshes on refreshes in every open tab the
+moment this side says it changed — from a webhook, a job, anywhere with a
+context, with nothing polling:
+
+```ts
+// app/t/[team]/repos.section.tsx
+export default section('repos', Repos, { refreshOn: ({ params }) => [`team:${params.team}:repos`] })
+```
+
+```go
+// in the GitHub webhook handler
+reg.Changed(ctx, "team:"+teamID+":repos")
+```
+
+A name has a version that moves when `Changed` names it; nothing else
+travels. The renderer asks `__rsc.changed` for the versions that moved since
+the ones a tab holds, and the registry holds that call until one does — woken
+at once by a `Changed` in this process, checking the store every
+`rsckit.ChangedPoll` (1s) for one made by another instance — or the renderer's
+wait runs out.
+
+Versions live in a `VersionStore`. The default is in memory, which is one
+instance. With more than one, a webhook lands on whichever instance the
+balancer picked, so give every instance the same store:
+
+```go
+// CREATE TABLE rsc_versions (name TEXT PRIMARY KEY, version BIGINT NOT NULL)
+reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar})   // Postgres; nil Placeholder is "?"
+```
+
+Anything with a `Bump` and a `Versions` fits — Redis, a cache — and a store
+that can tell the moment a name moves can answer sooner than the poll.
+
 ## Typed functions
 
 `Handle` and `HandleAction` take an ordinary Go function: any number of
@@ -139,7 +174,7 @@ value and an error, only an error, or only a value.
 
 The parameter and result types go into `rsc-host.json` as JSON Schema, and
 the build turns them into TypeScript: each struct an interface named for its
-Go type, by its `json` tags. `omitempty` is optional, a pointer is `| null`,
+Go type, by its `json` names. `omitempty` is optional, a pointer is `| null`,
 `time.Time` is a date-time string and `*time.Time` a string or `null`; a type
 with its own `MarshalJSON` is `unknown`, since its shape is its own. A nil
 slice or map in a typed function's result is sent as `[]` or `{}`, as its type
