@@ -59,6 +59,10 @@ func main() {
 
 	reg.Handle("Conformance.fail", func() error { return errors.New("boom") })
 
+	reg.Handle("Conformance.change", func(ctx context.Context) (string, error) {
+		return "ok", reg.Changed(ctx, "conformance:changed")
+	})
+
 	reg.Handle("Conformance.authorization", func(ctx context.Context) string {
 		return rsckit.HeadersFrom(ctx).Get("Authorization")
 	})
