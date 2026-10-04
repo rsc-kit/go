@@ -360,9 +360,11 @@ func (r *Registry) WakeOn(ctx context.Context, listen func(ctx context.Context, 
 				r.wake()
 			}, r.wake)
 
-			// It had connected: the backoff starts over.
+			// It had connected: the backoff starts over. And the poller,
+			// which was waiting only for this listener, goes back to the poll.
 			if r.listening.Swap(false) {
 				failures = 0
+				r.wake()
 			}
 
 			if ctx.Err() != nil {
@@ -422,43 +424,152 @@ func (r *Registry) runChanged(ctx context.Context, args Args) (any, error) {
 	deadline := time.Now().Add(wait)
 	store := r.versionStore()
 
+	// Taken before the read: a change between the read and joining the
+	// poller would otherwise go unseen until the poller's next round.
+	before := r.movedCh()
+
+	versions, err := store.Versions(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+
+	differ := differing(query.Since, versions)
+	if len(differ) > 0 || wait <= 0 {
+		return map[string]any{"versions": differ}, nil
+	}
+
+	// Held: the shared poller answers it, reading the store once for every
+	// call held here rather than once each.
+	w := &waiter{since: query.Since, answer: make(chan map[string]int64, 1)}
+	r.hold(w)
+	defer r.release(w)
+
+	select {
+	case <-before:
+		r.wake()
+	default:
+	}
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
+	select {
+	case moved := <-w.answer:
+		return map[string]any{"versions": moved}, nil
+	case <-timer.C:
+		// Nothing moved that the last read saw. One that moved since is in
+		// the renderer's next ask, which starts from the same versions.
+		return map[string]any{"versions": map[string]int64{}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// differing is every name in since whose version is not the one held.
+func differing(since, versions map[string]int64) map[string]int64 {
+	differ := make(map[string]int64)
+	for name, held := range since {
+		if versions[name] != held {
+			differ[name] = versions[name]
+		}
+	}
+
+	return differ
+}
+
+// A waiter is one held ChangedFunction call: what it holds, and where its answer goes.
+type waiter struct {
+	since  map[string]int64
+	answer chan map[string]int64
+}
+
+// hold registers a held call, starting the poller if none is running.
+func (r *Registry) hold(w *waiter) {
+	r.versionsMu.Lock()
+	defer r.versionsMu.Unlock()
+
+	if r.waiters == nil {
+		r.waiters = make(map[*waiter]struct{})
+	}
+	r.waiters[w] = struct{}{}
+
+	if !r.polling {
+		r.polling = true
+		// Read once, here: the poller outlives the call that started it.
+		go r.poll(ChangedPoll)
+	}
+}
+
+func (r *Registry) release(w *waiter) {
+	r.versionsMu.Lock()
+	defer r.versionsMu.Unlock()
+
+	delete(r.waiters, w)
+}
+
+// poll answers every held call from one read of the store - the names all of
+// them hold, together - each ChangedPoll, or at once when woken by a Changed
+// here or a WakeOn listener. With a listener connected it reads only when
+// woken. However many renderers, isolates or tabs are waiting, the store is
+// read once per round. It stops when nothing is held.
+func (r *Registry) poll(every time.Duration) {
+	ctx := context.Background()
+
 	for {
-		// Taken before the read, so a Changed between the read and the wait
+		// Taken before the read, so a wake between the read and the wait
 		// closes this one rather than one made afterwards.
 		moved := r.movedCh()
 
-		versions, err := store.Versions(ctx, names)
-		if err != nil {
-			return nil, err
+		r.versionsMu.Lock()
+		if len(r.waiters) == 0 {
+			r.polling = false
+			r.versionsMu.Unlock()
+			return
 		}
+		held := make([]*waiter, 0, len(r.waiters))
+		union := make(map[string]struct{})
+		for w := range r.waiters {
+			held = append(held, w)
+			for name := range w.since {
+				union[name] = struct{}{}
+			}
+		}
+		r.versionsMu.Unlock()
 
-		differ := make(map[string]int64)
-		for name, held := range query.Since {
-			if versions[name] != held {
-				differ[name] = versions[name]
+		names := make([]string, 0, len(union))
+		for name := range union {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		// A read that fails answers nobody: each held call runs out its wait,
+		// and the renderer's next ask reports the error.
+		if versions, err := r.versionStore().Versions(ctx, names); err == nil {
+			for _, w := range held {
+				if differ := differing(w.since, versions); len(differ) > 0 {
+					select {
+					case w.answer <- differ:
+					default:
+					}
+					r.release(w)
+				}
 			}
 		}
 
-		remaining := time.Until(deadline)
-		if len(differ) > 0 || remaining <= 0 {
-			return map[string]any{"versions": differ}, nil
+		var tick <-chan time.Time
+		var timer *time.Timer
+		if !r.listening.Load() {
+			timer = time.NewTimer(every)
+			tick = timer.C
 		}
 
-		// Listening, the listener wakes this call; the store is read again
-		// only when the wait runs out, which bounds a missed announcement.
-		pause := ChangedPoll
-		if r.listening.Load() || remaining < pause {
-			pause = remaining
-		}
-
-		timer := time.NewTimer(pause)
 		select {
 		case <-moved:
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
+		case <-tick:
 		}
-		timer.Stop()
+
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 }

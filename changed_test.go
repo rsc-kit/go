@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -320,5 +322,65 @@ func TestAListenerThatFailsLeavesTheStorePolledSoNothingIsMissed(t *testing.T) {
 	moved := askChanged(t, h, map[string]int64{"orders": 0}, 2_000)
 	if moved["orders"] <= 0 {
 		t.Fatalf("got %v", moved)
+	}
+}
+
+func TestManyHeldAsksShareOneReadOfTheStore(t *testing.T) {
+	// Ten renderers - or ten isolates, each asking for its own tabs - holding
+	// at once: one read a round between them, not one each.
+	store := &countingVersions{MemoryVersions: NewMemoryVersions()}
+	h := handler(t, func(r *Registry) { r.Versions(store) })
+
+	old := ChangedPoll
+	ChangedPoll = 50 * time.Millisecond
+	defer func() { ChangedPoll = old }()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			askChanged(t, h, map[string]int64{fmt.Sprintf("team:%d", i): 0}, 500)
+		}()
+	}
+	wg.Wait()
+
+	// Ten first reads, then about ten rounds of 50ms in 500ms: tens, not the
+	// hundred that ten calls polling for themselves would make.
+	if n := store.reads.Load(); n > 30 {
+		t.Fatalf("the store was read %d times for ten held asks", n)
+	}
+}
+
+func TestAHeldAskSeesAChangeMadeAsItJoins(t *testing.T) {
+	// Listening, so the poller waits only to be woken: a change landing
+	// between a call's first read and its joining the poller must not wait
+	// out the call.
+	store := NewMemoryVersions()
+	connected := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var reg *Registry
+	h := handler(t, func(r *Registry) {
+		reg = r
+		r.Versions(store)
+		r.WakeOn(ctx, func(ctx context.Context, ready, _ func()) error {
+			ready()
+			close(connected)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+	<-connected
+
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("n%d", i)
+		go func() { _ = reg.Changed(context.Background(), name) }()
+		start := time.Now()
+		askChanged(t, h, map[string]int64{name: 0}, 2_000)
+		if time.Since(start) > time.Second {
+			t.Fatalf("round %d: a change made as the call was held waited out the call", i)
+		}
 	}
 }

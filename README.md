@@ -163,8 +163,10 @@ reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar})   // Postg
 
 Anything with a `Bump` and a `Versions` fits — Redis, a cache.
 
-That shared store is noticed within `ChangedPoll`, a read a second per held
-call. To hear another instance's change the moment it is made — and not read
+That shared store is noticed within `ChangedPoll`. The calls held on an
+instance share one poller - one read of the store a round, for every name
+they hold together - so the reads do not grow with renderers, isolates or
+tabs. To hear another instance's change the moment it is made — and not read
 the store while nothing changes — have the store announce it and every
 instance listen. On Postgres, `Notify` sends a `pg_notify` after each bump,
 and `WakeOn` runs your listener; the adapter stays free of a driver, so the

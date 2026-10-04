@@ -116,6 +116,10 @@ type Registry struct {
 	// ChangedFunction call then waits for it rather than reading the store
 	// every ChangedPoll.
 	listening atomic.Bool
+	// waiters are the ChangedFunction calls held here; polling is whether
+	// the one poller that answers them all is running.
+	waiters map[*waiter]struct{}
+	polling bool
 }
 
 // NewRegistry returns an empty registry.
