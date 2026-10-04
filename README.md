@@ -161,8 +161,43 @@ balancer picked, so give every instance the same store:
 reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar})   // Postgres; nil Placeholder is "?"
 ```
 
-Anything with a `Bump` and a `Versions` fits — Redis, a cache — and a store
-that can tell the moment a name moves can answer sooner than the poll.
+Anything with a `Bump` and a `Versions` fits — Redis, a cache.
+
+That shared store is noticed within `ChangedPoll`, a read a second per held
+call. To hear another instance's change the moment it is made — and not read
+the store while nothing changes — have the store announce it and every
+instance listen. On Postgres, `Notify` sends a `pg_notify` after each bump,
+and `WakeOn` runs your listener; the adapter stays free of a driver, so the
+listening is ten lines of yours, here with pgx:
+
+```go
+reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar, Notify: "rsc_versions"})
+
+reg.WakeOn(ctx, func(ctx context.Context, connected, wake func()) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "LISTEN rsc_versions"); err != nil {
+		return err
+	}
+	connected()
+	for {
+		if _, err := conn.Conn().WaitForNotification(ctx); err != nil {
+			return err
+		}
+		wake()
+	}
+})
+```
+
+The notification carries nothing — it only says "ask". A listener that drops
+is run again with backoff, and asks once on its return; while it is down,
+the poll is back, so nothing is missed. LISTEN needs a session: through
+PgBouncer in transaction mode, connect the listener directly to Postgres.
+Redis pub/sub or a broadcast server fit the same way: call `wake` on each
+message. One instance needs none of this — its own `Changed` already wakes it.
 
 A version is when the name last changed, in milliseconds — `NextVersion`, the
 larger of one past the old value and now — so it never repeats, and old names

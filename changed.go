@@ -31,7 +31,9 @@ import (
 const ChangedFunction = "__rsc.changed"
 
 // ChangedPoll is how often a held ChangedFunction call checks the store for a
-// version another instance moved. A Changed in this process wakes it at once.
+// version another instance moved. A Changed in this process wakes it at once,
+// and so does a WakeOn listener - with one connected, the store is not read
+// while a call is held at all.
 var ChangedPoll = time.Second
 
 // MaxChangedWait bounds how long one ChangedFunction call is held, whatever it asked.
@@ -162,6 +164,11 @@ type SQLVersions struct {
 	Table string
 	// Placeholder writes the n-th parameter (1-based). nil means "?".
 	Placeholder func(n int) string
+	// Notify, on Postgres, is a channel to pg_notify after each Bump, so the
+	// other instances - listening through WakeOn - hear at once instead of
+	// within ChangedPoll. The notification carries nothing: it only says
+	// "ask". Empty sends none.
+	Notify string
 }
 
 // Dollar is the placeholder Postgres uses: $1, $2, ...
@@ -209,6 +216,12 @@ func (s *SQLVersions) Bump(ctx context.Context, names []string) error {
 				return err
 			}
 		}
+	}
+
+	if s.Notify != "" {
+		_, err := s.DB.ExecContext(ctx, fmt.Sprintf("SELECT pg_notify(%s, '')", s.placeholder(1)), s.Notify)
+
+		return err
 	}
 
 	return nil
@@ -289,14 +302,87 @@ func (r *Registry) Changed(ctx context.Context, names ...string) error {
 		return err
 	}
 
+	r.wake()
+
+	return nil
+}
+
+// wake answers every ChangedFunction call this process is holding: each reads
+// the store again and returns what moved.
+func (r *Registry) wake() {
 	r.versionsMu.Lock()
 	if r.moved != nil {
 		close(r.moved)
 	}
 	r.moved = make(chan struct{})
 	r.versionsMu.Unlock()
+}
 
-	return nil
+// WakeOn hears changes made by other instances the moment they are made,
+// rather than within ChangedPoll - and stops the store being read every
+// second while nothing changes.
+//
+// listen connects to whatever announces a change - Postgres LISTEN on the
+// channel SQLVersions.Notify names, Redis pub/sub, a broadcast server - calls
+// connected once it is listening, calls wake for each announcement, and
+// returns when the connection ends. It is run until ctx is done, again with
+// backoff after it returns an error; while it is down, held calls go back to
+// reading the store every ChangedPoll, so nothing is missed meanwhile.
+//
+// With pgx, which the adapter does not depend on:
+//
+//	reg.WakeOn(ctx, func(ctx context.Context, connected, wake func()) error {
+//		conn, err := pool.Acquire(ctx)
+//		if err != nil {
+//			return err
+//		}
+//		defer conn.Release()
+//		if _, err := conn.Exec(ctx, "LISTEN rsc_versions"); err != nil {
+//			return err
+//		}
+//		connected()
+//		for {
+//			if _, err := conn.Conn().WaitForNotification(ctx); err != nil {
+//				return err
+//			}
+//			wake()
+//		}
+//	})
+func (r *Registry) WakeOn(ctx context.Context, listen func(ctx context.Context, connected, wake func()) error) {
+	go func() {
+		failures := 0
+
+		for ctx.Err() == nil {
+			err := listen(ctx, func() {
+				r.listening.Store(true)
+				// Connected again after a drop: whatever was announced
+				// meanwhile is gone, so ask now.
+				r.wake()
+			}, r.wake)
+
+			// It had connected: the backoff starts over.
+			if r.listening.Swap(false) {
+				failures = 0
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			if failures == 0 {
+				Logger("rsc-kit: the WakeOn listener stopped (%v); checking the store every ChangedPoll until it is back", err)
+			}
+
+			pause := time.Second << min(failures, 5)
+			failures++
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pause):
+			}
+		}
+	}()
 }
 
 // movedCh is closed, and replaced, by the next Changed in this process.
@@ -358,8 +444,10 @@ func (r *Registry) runChanged(ctx context.Context, args Args) (any, error) {
 			return map[string]any{"versions": differ}, nil
 		}
 
+		// Listening, the listener wakes this call; the store is read again
+		// only when the wait runs out, which bounds a missed announcement.
 		pause := ChangedPoll
-		if remaining < pause {
+		if r.listening.Load() || remaining < pause {
 			pause = remaining
 		}
 
