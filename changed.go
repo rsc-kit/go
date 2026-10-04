@@ -31,7 +31,9 @@ import (
 const ChangedFunction = "__rsc.changed"
 
 // ChangedPoll is how often a held ChangedFunction call checks the store for a
-// version another instance moved. A Changed in this process wakes it at once.
+// version another instance moved. A Changed in this process wakes it at once,
+// and so does a WakeOn listener - with one connected, the store is not read
+// while a call is held at all.
 var ChangedPoll = time.Second
 
 // MaxChangedWait bounds how long one ChangedFunction call is held, whatever it asked.
@@ -162,6 +164,11 @@ type SQLVersions struct {
 	Table string
 	// Placeholder writes the n-th parameter (1-based). nil means "?".
 	Placeholder func(n int) string
+	// Notify, on Postgres, is a channel to pg_notify after each Bump, so the
+	// other instances - listening through WakeOn - hear at once instead of
+	// within ChangedPoll. The notification carries nothing: it only says
+	// "ask". Empty sends none.
+	Notify string
 }
 
 // Dollar is the placeholder Postgres uses: $1, $2, ...
@@ -209,6 +216,12 @@ func (s *SQLVersions) Bump(ctx context.Context, names []string) error {
 				return err
 			}
 		}
+	}
+
+	if s.Notify != "" {
+		_, err := s.DB.ExecContext(ctx, fmt.Sprintf("SELECT pg_notify(%s, '')", s.placeholder(1)), s.Notify)
+
+		return err
 	}
 
 	return nil
@@ -289,14 +302,89 @@ func (r *Registry) Changed(ctx context.Context, names ...string) error {
 		return err
 	}
 
+	r.wake()
+
+	return nil
+}
+
+// wake answers every ChangedFunction call this process is holding: each reads
+// the store again and returns what moved.
+func (r *Registry) wake() {
 	r.versionsMu.Lock()
 	if r.moved != nil {
 		close(r.moved)
 	}
 	r.moved = make(chan struct{})
 	r.versionsMu.Unlock()
+}
 
-	return nil
+// WakeOn hears changes made by other instances the moment they are made,
+// rather than within ChangedPoll - and stops the store being read every
+// second while nothing changes.
+//
+// listen connects to whatever announces a change - Postgres LISTEN on the
+// channel SQLVersions.Notify names, Redis pub/sub, a broadcast server - calls
+// connected once it is listening, calls wake for each announcement, and
+// returns when the connection ends. It is run until ctx is done, again with
+// backoff after it returns an error; while it is down, held calls go back to
+// reading the store every ChangedPoll, so nothing is missed meanwhile.
+//
+// With pgx, which the adapter does not depend on:
+//
+//	reg.WakeOn(ctx, func(ctx context.Context, connected, wake func()) error {
+//		conn, err := pool.Acquire(ctx)
+//		if err != nil {
+//			return err
+//		}
+//		defer conn.Release()
+//		if _, err := conn.Exec(ctx, "LISTEN rsc_versions"); err != nil {
+//			return err
+//		}
+//		connected()
+//		for {
+//			if _, err := conn.Conn().WaitForNotification(ctx); err != nil {
+//				return err
+//			}
+//			wake()
+//		}
+//	})
+func (r *Registry) WakeOn(ctx context.Context, listen func(ctx context.Context, connected, wake func()) error) {
+	go func() {
+		failures := 0
+
+		for ctx.Err() == nil {
+			err := listen(ctx, func() {
+				r.listening.Store(true)
+				// Connected again after a drop: whatever was announced
+				// meanwhile is gone, so ask now.
+				r.wake()
+			}, r.wake)
+
+			// It had connected: the backoff starts over. And the poller,
+			// which was waiting only for this listener, goes back to the poll.
+			if r.listening.Swap(false) {
+				failures = 0
+				r.wake()
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			if failures == 0 {
+				Logger("rsc-kit: the WakeOn listener stopped (%v); checking the store every ChangedPoll until it is back", err)
+			}
+
+			pause := time.Second << min(failures, 5)
+			failures++
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pause):
+			}
+		}
+	}()
 }
 
 // movedCh is closed, and replaced, by the next Changed in this process.
@@ -336,41 +424,152 @@ func (r *Registry) runChanged(ctx context.Context, args Args) (any, error) {
 	deadline := time.Now().Add(wait)
 	store := r.versionStore()
 
+	// Taken before the read: a change between the read and joining the
+	// poller would otherwise go unseen until the poller's next round.
+	before := r.movedCh()
+
+	versions, err := store.Versions(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+
+	differ := differing(query.Since, versions)
+	if len(differ) > 0 || wait <= 0 {
+		return map[string]any{"versions": differ}, nil
+	}
+
+	// Held: the shared poller answers it, reading the store once for every
+	// call held here rather than once each.
+	w := &waiter{since: query.Since, answer: make(chan map[string]int64, 1)}
+	r.hold(w)
+	defer r.release(w)
+
+	select {
+	case <-before:
+		r.wake()
+	default:
+	}
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+
+	select {
+	case moved := <-w.answer:
+		return map[string]any{"versions": moved}, nil
+	case <-timer.C:
+		// Nothing moved that the last read saw. One that moved since is in
+		// the renderer's next ask, which starts from the same versions.
+		return map[string]any{"versions": map[string]int64{}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// differing is every name in since whose version is not the one held.
+func differing(since, versions map[string]int64) map[string]int64 {
+	differ := make(map[string]int64)
+	for name, held := range since {
+		if versions[name] != held {
+			differ[name] = versions[name]
+		}
+	}
+
+	return differ
+}
+
+// A waiter is one held ChangedFunction call: what it holds, and where its answer goes.
+type waiter struct {
+	since  map[string]int64
+	answer chan map[string]int64
+}
+
+// hold registers a held call, starting the poller if none is running.
+func (r *Registry) hold(w *waiter) {
+	r.versionsMu.Lock()
+	defer r.versionsMu.Unlock()
+
+	if r.waiters == nil {
+		r.waiters = make(map[*waiter]struct{})
+	}
+	r.waiters[w] = struct{}{}
+
+	if !r.polling {
+		r.polling = true
+		// Read once, here: the poller outlives the call that started it.
+		go r.poll(ChangedPoll)
+	}
+}
+
+func (r *Registry) release(w *waiter) {
+	r.versionsMu.Lock()
+	defer r.versionsMu.Unlock()
+
+	delete(r.waiters, w)
+}
+
+// poll answers every held call from one read of the store - the names all of
+// them hold, together - each ChangedPoll, or at once when woken by a Changed
+// here or a WakeOn listener. With a listener connected it reads only when
+// woken. However many renderers, isolates or tabs are waiting, the store is
+// read once per round. It stops when nothing is held.
+func (r *Registry) poll(every time.Duration) {
+	ctx := context.Background()
+
 	for {
-		// Taken before the read, so a Changed between the read and the wait
+		// Taken before the read, so a wake between the read and the wait
 		// closes this one rather than one made afterwards.
 		moved := r.movedCh()
 
-		versions, err := store.Versions(ctx, names)
-		if err != nil {
-			return nil, err
+		r.versionsMu.Lock()
+		if len(r.waiters) == 0 {
+			r.polling = false
+			r.versionsMu.Unlock()
+			return
 		}
+		held := make([]*waiter, 0, len(r.waiters))
+		union := make(map[string]struct{})
+		for w := range r.waiters {
+			held = append(held, w)
+			for name := range w.since {
+				union[name] = struct{}{}
+			}
+		}
+		r.versionsMu.Unlock()
 
-		differ := make(map[string]int64)
-		for name, held := range query.Since {
-			if versions[name] != held {
-				differ[name] = versions[name]
+		names := make([]string, 0, len(union))
+		for name := range union {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		// A read that fails answers nobody: each held call runs out its wait,
+		// and the renderer's next ask reports the error.
+		if versions, err := r.versionStore().Versions(ctx, names); err == nil {
+			for _, w := range held {
+				if differ := differing(w.since, versions); len(differ) > 0 {
+					select {
+					case w.answer <- differ:
+					default:
+					}
+					r.release(w)
+				}
 			}
 		}
 
-		remaining := time.Until(deadline)
-		if len(differ) > 0 || remaining <= 0 {
-			return map[string]any{"versions": differ}, nil
+		var tick <-chan time.Time
+		var timer *time.Timer
+		if !r.listening.Load() {
+			timer = time.NewTimer(every)
+			tick = timer.C
 		}
 
-		pause := ChangedPoll
-		if remaining < pause {
-			pause = remaining
-		}
-
-		timer := time.NewTimer(pause)
 		select {
 		case <-moved:
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
+		case <-tick:
 		}
-		timer.Stop()
+
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 }

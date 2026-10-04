@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // SecretHeader carries the shared secret on every host call. The JS side sends
@@ -111,6 +112,14 @@ type Registry struct {
 	versionsMu sync.Mutex
 	versions   VersionStore
 	moved      chan struct{}
+	// listening is true while a WakeOn listener is connected: a held
+	// ChangedFunction call then waits for it rather than reading the store
+	// every ChangedPoll.
+	listening atomic.Bool
+	// waiters are the ChangedFunction calls held here; polling is whether
+	// the one poller that answers them all is running.
+	waiters map[*waiter]struct{}
+	polling bool
 }
 
 // NewRegistry returns an empty registry.

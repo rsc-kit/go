@@ -3,6 +3,10 @@ package rsckit
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -201,5 +205,182 @@ func TestMemoryVersionsForgetOnTheirOwn(t *testing.T) {
 
 	if versions, _ := store.Versions(ctx, []string{"old"}); versions["old"] != 0 {
 		t.Fatalf("still remembered: %v", versions)
+	}
+}
+
+// countingVersions counts the reads, to see whether a held ask polls.
+type countingVersions struct {
+	*MemoryVersions
+	reads atomic.Int64
+}
+
+func (c *countingVersions) Versions(ctx context.Context, names []string) (map[string]int64, error) {
+	c.reads.Add(1)
+	return c.MemoryVersions.Versions(ctx, names)
+}
+
+func TestAWakeOnListenerAnswersAHeldAskTheMomentAnotherInstanceAnnounces(t *testing.T) {
+	// Another instance bumps the store and announces it; with a poll far
+	// longer than the test, only the listener can be what answers.
+	store := NewMemoryVersions()
+	announce := make(chan struct{})
+	connected := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := handler(t, func(r *Registry) {
+		r.Versions(store)
+		r.WakeOn(ctx, func(ctx context.Context, ready, wake func()) error {
+			ready()
+			close(connected)
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-announce:
+					wake()
+				}
+			}
+		})
+	})
+	<-connected
+
+	old := ChangedPoll
+	ChangedPoll = time.Hour
+	defer func() { ChangedPoll = old }()
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = store.Bump(context.Background(), []string{"orders"})
+		announce <- struct{}{}
+	}()
+
+	start := time.Now()
+	moved := askChanged(t, h, map[string]int64{"orders": 0}, 5_000)
+	if moved["orders"] <= 0 || time.Since(start) > time.Second {
+		t.Fatalf("got %v after %s", moved, time.Since(start))
+	}
+}
+
+func TestWhileListeningAHeldAskDoesNotReadTheStoreEverySecond(t *testing.T) {
+	store := &countingVersions{MemoryVersions: NewMemoryVersions()}
+	connected := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := handler(t, func(r *Registry) {
+		r.Versions(store)
+		r.WakeOn(ctx, func(ctx context.Context, ready, _ func()) error {
+			ready()
+			close(connected)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+	<-connected
+
+	old := ChangedPoll
+	ChangedPoll = 10 * time.Millisecond
+	defer func() { ChangedPoll = old }()
+
+	store.reads.Store(0)
+	askChanged(t, h, map[string]int64{"orders": 0}, 300)
+
+	// Once when asked, once when the wait ran out - not thirty times.
+	if n := store.reads.Load(); n > 2 {
+		t.Fatalf("the store was read %d times while a listener was connected", n)
+	}
+}
+
+func TestAListenerThatFailsLeavesTheStorePolledSoNothingIsMissed(t *testing.T) {
+	store := NewMemoryVersions()
+	tried := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	old := ChangedPoll
+	ChangedPoll = 20 * time.Millisecond
+	defer func() { ChangedPoll = old }()
+
+	h := handler(t, func(r *Registry) {
+		r.Versions(store)
+		r.WakeOn(ctx, func(context.Context, func(), func()) error {
+			select {
+			case tried <- struct{}{}:
+			default:
+			}
+			return errors.New("connection refused")
+		})
+	})
+	<-tried
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = store.Bump(context.Background(), []string{"orders"})
+	}()
+
+	moved := askChanged(t, h, map[string]int64{"orders": 0}, 2_000)
+	if moved["orders"] <= 0 {
+		t.Fatalf("got %v", moved)
+	}
+}
+
+func TestManyHeldAsksShareOneReadOfTheStore(t *testing.T) {
+	// Ten renderers - or ten isolates, each asking for its own tabs - holding
+	// at once: one read a round between them, not one each.
+	store := &countingVersions{MemoryVersions: NewMemoryVersions()}
+	h := handler(t, func(r *Registry) { r.Versions(store) })
+
+	old := ChangedPoll
+	ChangedPoll = 50 * time.Millisecond
+	defer func() { ChangedPoll = old }()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			askChanged(t, h, map[string]int64{fmt.Sprintf("team:%d", i): 0}, 500)
+		}()
+	}
+	wg.Wait()
+
+	// Ten first reads, then about ten rounds of 50ms in 500ms: tens, not the
+	// hundred that ten calls polling for themselves would make.
+	if n := store.reads.Load(); n > 30 {
+		t.Fatalf("the store was read %d times for ten held asks", n)
+	}
+}
+
+func TestAHeldAskSeesAChangeMadeAsItJoins(t *testing.T) {
+	// Listening, so the poller waits only to be woken: a change landing
+	// between a call's first read and its joining the poller must not wait
+	// out the call.
+	store := NewMemoryVersions()
+	connected := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var reg *Registry
+	h := handler(t, func(r *Registry) {
+		reg = r
+		r.Versions(store)
+		r.WakeOn(ctx, func(ctx context.Context, ready, _ func()) error {
+			ready()
+			close(connected)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	})
+	<-connected
+
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("n%d", i)
+		go func() { _ = reg.Changed(context.Background(), name) }()
+		start := time.Now()
+		askChanged(t, h, map[string]int64{name: 0}, 2_000)
+		if time.Since(start) > time.Second {
+			t.Fatalf("round %d: a change made as the call was held waited out the call", i)
+		}
 	}
 }
