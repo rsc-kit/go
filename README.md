@@ -211,8 +211,8 @@ store.Prune(ctx, 0) // names not changed in rsckit.KeepVersions (30 days); or an
 ```
 
 `MemoryVersions` forgets old names on its own (`ForgetAfter`). A `VersionStore`
-of your own should bump with `rsckit.NextVersion`, not `+ 1`, before you prune
-it.
+of your own must bump with `rsckit.NextVersion` - never `+ 1`, which repeats
+once a name is pruned.
 
 ## Typed functions
 
@@ -267,6 +267,24 @@ reports it and uses the file already there.
 `rsckit.Revalidate(ctx, "orders")` inside an action marks a region stale, so
 the answer carries it re-rendered instead of the browser being told to ask
 again.
+
+`rsckit.SetCookie(ctx, cookie)` puts a cookie on the page's response - how a
+login keeps its session:
+
+```go
+reg.HandleAction("authLogin", "Auth.login", func(ctx context.Context, in Login) error {
+	session, err := sessions.Start(ctx, in)
+	if err != nil {
+		return rsckit.InvalidField("email", "Those details do not match.")
+	}
+	rsckit.SetCookie(ctx, &http.Cookie{Name: "session", Value: session.ID, Path: "/", HttpOnly: true, Secure: true})
+
+	return rsckit.Redirect("/dashboard")
+})
+```
+
+From an action or a guard: a read in a batch has had its headers sent before
+it ran, so a cookie set there is logged and dropped.
 
 ## Batches
 

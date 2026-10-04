@@ -64,8 +64,7 @@ const KeepVersions = 30 * 24 * time.Hour
 // change. A time never comes round again, so a name may be deleted at any
 // moment: a tab holding the old value sees a different one and refreshes
 // once. It is also when the name last changed, which is all cleanup needs.
-// Every store bumps with it; a writer doing + 1 still works, but is not safe
-// to prune.
+// Every store must bump with it: a counter is not a version.
 func NextVersion(current int64) int64 {
 	if now := time.Now().UnixMilli(); now > current+1 {
 		return now
