@@ -12,6 +12,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	rsckit "github.com/rsc-kit/go"
@@ -67,8 +68,28 @@ func main() {
 		return rsckit.HeadersFrom(ctx).Get("Authorization")
 	})
 
+	reg.Handle("Conformance.cookie", func(ctx context.Context) string {
+		return strings.Join(rsckit.HeadersFrom(ctx).Values("Cookie"), "; ")
+	})
+
+	reg.Handle("Conformance.login", func(ctx context.Context) string {
+		rsckit.SetCookie(ctx, &http.Cookie{Name: "conformance_login", Value: "1", Path: "/", HttpOnly: true})
+
+		return "ok"
+	})
+
+	reg.Handle("Conformance.double", func(n int) int { return n * 2 })
+
+	reg.Handle("Conformance.invalidNested", func() error {
+		return rsckit.Invalid(map[string][]string{
+			"address.city": {"The city is required."},
+			"":             {"The address could not be checked."},
+		})
+	})
+
 	reg.Middleware("conformance-allow", func(context.Context, string) error { return nil })
 	reg.Middleware("conformance-deny", func(context.Context, string) error { return rsckit.Unauthorized() })
+	reg.Middleware("conformance-redirect", func(context.Context, string) error { return rsckit.Redirect("/conformance-login") })
 
 	if *manifest != "" {
 		if err := reg.WriteManifest(*manifest); err != nil {

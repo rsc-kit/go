@@ -334,6 +334,7 @@ type ctxKey int
 const (
 	headerKey ctxKey = iota
 	revalidateKey
+	cookieKey
 )
 
 // HeadersFrom returns the render request's forwarded headers — the cookie and
@@ -358,6 +359,36 @@ func Revalidate(ctx context.Context, targets ...string) {
 	if box, ok := ctx.Value(revalidateKey).(*revalidations); ok {
 		box.add(targets...)
 	}
+}
+
+// SetCookie puts a cookie on the answer to this call, and the renderer puts it
+// on the page's response - how a login keeps its session:
+//
+//	rsckit.SetCookie(ctx, &http.Cookie{Name: "session", Value: id, Path: "/", HttpOnly: true})
+//
+// From a call answered on its own: an action, or a guard. A call in a batch -
+// a read - has had its response headers sent before it ran, so a cookie set
+// there cannot go anywhere; it is logged, once, rather than dropped silently.
+func SetCookie(ctx context.Context, cookie *http.Cookie) {
+	box, ok := ctx.Value(cookieKey).(*cookieBox)
+	if !ok {
+		lateCookie.Do(func() {
+			logf("rsckit: SetCookie(%q) in a batched call is dropped: a batch's headers are sent before its calls run. Set cookies from an action.", cookie.Name)
+		})
+
+		return
+	}
+
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	box.cookies = append(box.cookies, cookie)
+}
+
+var lateCookie sync.Once
+
+type cookieBox struct {
+	mu      sync.Mutex
+	cookies []*http.Cookie
 }
 
 type revalidations struct {
@@ -641,7 +672,24 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, reply := h.dispatch(ctx, call)
+	// A call with no function is malformed, not a function nobody registered:
+	// a backend that answered it 404 would read as "no such function" to
+	// someone debugging a body that never named one.
+	if call.Function == "" {
+		writeReply(w, http.StatusBadRequest, callReply{Error: "a host call needs a \"function\" name"})
+
+		return
+	}
+
+	// Answered on its own, so its headers are still unsent: a cookie the
+	// function sets - a login - rides on this response.
+	cookies := &cookieBox{}
+	status, reply := h.dispatch(context.WithValue(ctx, cookieKey, cookies), call)
+
+	for _, cookie := range cookies.cookies {
+		http.SetCookie(w, cookie)
+	}
+
 	writeReply(w, status, reply)
 }
 

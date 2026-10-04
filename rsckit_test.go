@@ -434,3 +434,44 @@ func TestAnOrdinaryErrorIsStillAFailureNotARefusal(t *testing.T) {
 		t.Fatal("a failure must not be reported as field errors")
 	}
 }
+
+func TestACookieAFunctionSetsRidesOnItsAnswer(t *testing.T) {
+	h := handler(t, func(r *Registry) {
+		r.Handle("Auth.login", func(ctx context.Context) string {
+			SetCookie(ctx, &http.Cookie{Name: "session", Value: "abc", Path: "/", HttpOnly: true})
+
+			return "ok"
+		})
+	})
+
+	rec := post(h, `{"function":"Auth.login","args":[]}`, nil)
+	cookies := rec.Result().Cookies()
+
+	if len(cookies) != 1 || cookies[0].Name != "session" || cookies[0].Value != "abc" || !cookies[0].HttpOnly {
+		t.Fatalf("Set-Cookie %v", rec.Header().Values("Set-Cookie"))
+	}
+}
+
+func TestACookieSetInABatchedCallIsDroppedNotPanicked(t *testing.T) {
+	h := handler(t, func(r *Registry) {
+		r.Handle("Reads.one", func(ctx context.Context) string {
+			SetCookie(ctx, &http.Cookie{Name: "late", Value: "1"})
+
+			return "ok"
+		})
+	})
+
+	rec := post(h, `{"calls":[{"function":"Reads.one","args":[]},{"function":"Reads.one","args":[]}]}`, nil)
+
+	if rec.Code != 200 || len(rec.Header().Values("Set-Cookie")) != 0 {
+		t.Fatalf("status %d, Set-Cookie %v", rec.Code, rec.Header().Values("Set-Cookie"))
+	}
+}
+
+func TestACallWithNoFunctionIsMalformedNotUnknown(t *testing.T) {
+	h := handler(t, func(*Registry) {})
+
+	if rec := post(h, `{"args":[]}`, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
