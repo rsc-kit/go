@@ -441,6 +441,11 @@ type callReply struct {
 	Redirect         string              `json:"redirect,omitempty"`
 	RedirectStatus   int                 `json:"redirectStatus,omitempty"`
 	RefusalStatus    int                 `json:"refusalStatus,omitempty"`
+	// RefusalData is what a refusal carries for the page to act on - the
+	// records blocking a delete. The renderer raises the call's refusal as
+	// the action client's own refuse(), so it reaches the page as
+	// result.refusal, checked against the action's .refusal(schema).
+	RefusalData any `json:"refusalData,omitempty"`
 	// Debug says where an unexpected failure happened, for the renderer to
 	// show beside its own stack. Only when the handler's Debug is on.
 	Debug *debugInfo `json:"debug,omitempty"`
@@ -539,6 +544,9 @@ func Redirect(location string, status ...int) error {
 type RefusalError struct {
 	Status  int
 	Message string
+	// Data is what the page can act on beside the message: the records
+	// blocking a delete. Nil for a refusal that says only why. See RefuseWith.
+	Data any
 }
 
 func (e *RefusalError) Error() string { return e.Message }
@@ -550,6 +558,27 @@ func Refuse(status int, message string) error {
 	}
 
 	return &RefusalError{Status: status, Message: message}
+}
+
+// RefuseWith refuses with a message for the person asking and data the page
+// can act on - what is blocking a delete, as links:
+//
+//	if len(attached) > 0 {
+//		return rsckit.RefuseWith(http.StatusConflict, "Still in use", map[string]any{"blockers": attached})
+//	}
+//
+// The message is shown as it is, never replaced by a generic one; the data
+// reaches the page as the action's result.refusal, once the action's
+// .refusal(schema) has checked it. A status of 0 is 409 Conflict.
+func RefuseWith(status int, message string, data any) error {
+	if status == 0 {
+		status = http.StatusConflict
+	}
+
+	refusal := Refuse(status, message).(*RefusalError)
+	refusal.Data = data
+
+	return refusal
 }
 
 func first(values []string, fallback string) string {
@@ -804,7 +833,7 @@ func replyFor(err error) (int, callReply) {
 			return http.StatusInternalServerError, callReply{Error: fmt.Sprintf("refused with %d, which is not a refusal status: %s", refused.Status, refused.Message)}
 		}
 
-		return refused.Status, callReply{Error: refused.Message, RefusalStatus: refused.Status}
+		return refused.Status, callReply{Error: refused.Message, RefusalStatus: refused.Status, RefusalData: refused.Data}
 	}
 
 	return http.StatusInternalServerError, callReply{Error: err.Error()}

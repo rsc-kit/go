@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -175,6 +176,33 @@ func TestAnErrorIsReturnedAsTheCallsError(t *testing.T) {
 	var refusal *RefusalError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestARefusalCarriesItsDataOnTheWire(t *testing.T) {
+	type blocker struct {
+		ID   int    `json:"id"`
+		Href string `json:"href"`
+	}
+
+	status, reply := replyFor(RefuseWith(0, "Still in use", map[string]any{"blockers": []blocker{{7, "/orders/7"}}}))
+
+	if status != http.StatusConflict || reply.RefusalStatus != http.StatusConflict {
+		t.Fatalf("status = %d, refusalStatus = %d, want 409", status, reply.RefusalStatus)
+	}
+
+	body, _ := json.Marshal(reply)
+
+	if want := `{"error":"Still in use","refusalStatus":409,"refusalData":{"blockers":[{"id":7,"href":"/orders/7"}]}}`; string(body) != want {
+		t.Fatalf("reply = %s\nwant %s", body, want)
+	}
+
+	// Without data, the reply is the one Refuse always sent.
+	_, plain := replyFor(Refuse(429, "Slow down."))
+	body, _ = json.Marshal(plain)
+
+	if want := `{"error":"Slow down.","refusalStatus":429}`; string(body) != want {
+		t.Fatalf("reply = %s\nwant %s", body, want)
 	}
 }
 

@@ -49,6 +49,11 @@ func main() {
 	reg.Handle("Conformance.unauthorized", func() error { return rsckit.Unauthorized() })
 	reg.Handle("Conformance.notFound", func() error { return rsckit.Refuse(http.StatusNotFound, "Not found.") })
 	reg.Handle("Conformance.refuse", func() error { return rsckit.Refuse(http.StatusTooManyRequests, "Slow down.") })
+	reg.Handle("Conformance.refuseWithData", func() error {
+		return rsckit.RefuseWith(http.StatusConflict, "Still in use", map[string]any{
+			"blockers": []map[string]any{{"id": 7, "href": "/orders/7"}},
+		})
+	})
 	reg.Handle("Conformance.invalid", func() error { return rsckit.InvalidField("name", "The name field is required.") })
 	reg.Handle("Conformance.redirect", func() error { return rsckit.Redirect("/login") })
 
