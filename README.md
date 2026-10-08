@@ -102,7 +102,8 @@ told what happened, rather than handed a 500:
 | `rsckit.Unauthenticated()` | 401, the engine's own authentication error |
 | `rsckit.Unauthorized("…")` | 403 |
 | `rsckit.Redirect("/login")` | the browser goes there — sent as a 200 with the destination in the body, because an HTTP client would follow a real 3xx |
-| `rsckit.Refuse(429, "slow down")` | that status, kept — a throttle's 429 is not a broken server |
+| `rsckit.Refuse(429, "slow down")` | that status, kept — a throttle's 429 is not a broken server. An action shows the message to the visitor as written |
+| `rsckit.RefuseWith(409, "still in use", data)` | the same, with data the page can act on — `result.refusal`, checked by the action's `.refusal(schema)` |
 | any other `error` | 500, with the message |
 
 Wrapped errors still answer as what they are: `errors.As` finds the refusal
