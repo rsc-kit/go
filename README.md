@@ -239,8 +239,10 @@ reg.HandleAction("ordersCancel", "Orders.cancel", func(ctx context.Context, id i
 reg.WriteManifest("rsc-host.json")
 ```
 
-A form can post to an action directly; its fields arrive as the first
-parameter, decoded into the struct.
+A form can post to an action directly; its fields arrive as the struct
+parameter, decoded into the struct: the first, or the one after the arguments
+you bound. An action scoped to a team, `func(ctx, team string, in NewApp)`, is
+`<Form action={appsCreate.bind(null, team)}>`.
 
 `rsc-host.json` has `actions`, `functions`, and the `types` and `defs` of
 what `Handle` registered. The build
