@@ -239,6 +239,11 @@ reg.HandleAction("ordersCancel", "Orders.cancel", func(ctx context.Context, id i
 reg.WriteManifest("rsc-host.json")
 ```
 
+Tag the structs a form posts with `json` names. An untagged field goes into the
+manifest under Go's name, `Type`, while a form posts `type` and the backend refuses
+under `type`, so `error('type')` fails the typecheck on a bound stub. A tag
+(`json:"type"`) gives the form, the manifest and the refusal one spelling.
+
 A form can post to an action directly; its fields arrive as the struct
 parameter, decoded into the struct: the first, or the one after the arguments
 you bound. An action scoped to a team, `func(ctx, team string, in NewApp)`, is
