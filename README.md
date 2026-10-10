@@ -322,7 +322,10 @@ limit; a larger one is refused with 413.
 ## Go in front
 
 The renderer can face the internet and forward what it does not own to
-`RSC_BACKEND` — a Go route, a webhook, an upload. Or Go faces it:
+`RSC_BACKEND` — a Go route, a webhook, an upload. A dynamic root route in the
+app (`[team]/[app]`) does own `/gitlab/connect`, so name the prefixes Go answers
+with `rscKit({ backendPaths: ['/auth', '/github', '/gitlab'] })` and they are
+forwarded before any page is asked. Or Go faces it:
 `NewRenderer(url)` is a streaming reverse proxy (`NewUnixRenderer(path)` for
 a renderer on a unix socket), `NewHandler(renderer, callback, path)` routes the
 callback path to the endpoint and everything else to it, and both honour the
