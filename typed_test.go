@@ -52,6 +52,60 @@ func TestAPointerToTimeIsAStringOrNull(t *testing.T) {
 	}
 }
 
+// tMoney writes itself as a string, and says so.
+type tMoney struct{ cents int64 }
+
+func (m tMoney) MarshalJSON() ([]byte, error) { return json.Marshal("0.00") }
+func (tMoney) JSONSchema() Schema             { return Schema{"type": "string"} }
+
+// tStatus says so through its pointer.
+type tStatus struct{ code int }
+
+func (s *tStatus) MarshalJSON() ([]byte, error) { return json.Marshal("ok") }
+func (*tStatus) JSONSchema() Schema {
+	return Schema{"enum": []any{"ok", "failed"}}
+}
+
+// tOpaque says nothing.
+type tOpaque struct{}
+
+func (tOpaque) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
+
+type tInvoice struct {
+	Total  tMoney   `json:"total"`
+	Status tStatus  `json:"status"`
+	Paid   *tMoney  `json:"paid"`
+	Extra  tOpaque  `json:"extra"`
+	Lines  []tMoney `json:"lines"`
+}
+
+func TestATypeWithItsOwnEncodingIsTypedByItsJSONSchemaMethod(t *testing.T) {
+	// A MarshalJSON says nothing about its shape, so such a type was unknown,
+	// and the page had to narrow it by hand.
+	reg := NewRegistry()
+	reg.Handle("Invoices.find", func(id int) (tInvoice, error) { return tInvoice{}, nil })
+
+	raw, _ := json.Marshal(reg.Manifest().Defs["tInvoice"]["properties"])
+
+	var props map[string]any
+	_ = json.Unmarshal(raw, &props)
+
+	str := map[string]any{"type": "string"}
+	want := map[string]any{
+		"total":  str,
+		"status": map[string]any{"enum": []any{"ok", "failed"}},
+		"paid":   map[string]any{"anyOf": []any{str, map[string]any{"type": "null"}}},
+		"extra":  map[string]any{},
+		"lines":  map[string]any{"type": "array", "items": str},
+	}
+
+	for name, schema := range want {
+		if !reflect.DeepEqual(props[name], schema) {
+			t.Errorf("%s = %v, want %v", name, props[name], schema)
+		}
+	}
+}
+
 type tPage struct {
 	Rows  []tLine           `json:"rows"`
 	Tags  map[string]string `json:"tags"`

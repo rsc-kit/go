@@ -226,8 +226,22 @@ value and an error, only an error, or only a value.
 The parameter and result types go into `rsc-host.json` as JSON Schema, and
 the build turns them into TypeScript: each struct an interface named for its
 Go type, by its `json` names. `omitempty` is optional, a pointer is `| null`,
-`time.Time` is a date-time string and `*time.Time` a string or `null`; a type
-with its own `MarshalJSON` is `unknown`, since its shape is its own. A nil
+`time.Time` is a date-time string and `*time.Time` a string or `null`. A type
+with its own `MarshalJSON` is `unknown`, since its shape is its own, unless it
+says what it writes with a `JSONSchema` method:
+
+```go
+type Money struct{ cents int64 }
+
+func (m Money) MarshalJSON() ([]byte, error) { … }        // "12.50"
+func (Money) JSONSchema() rsckit.Schema      { return rsckit.Schema{"type": "string"} }
+```
+
+`Money` is then `string` wherever it appears, `*Money` `string | null`. The
+method is called on the zero value, at startup, and may have a value or
+pointer receiver. What it returns is used as it stands, so keep to what the
+build reads: `type` (one name), `items`, `properties` with `required`,
+`additionalProperties`, `enum`, `anyOf`. Anything else is `unknown`. A nil
 slice or map in a typed function's result is sent as `[]` or `{}`, as its type
 says, never `null`; a nil pointer is `null`. `Register` and `RegisterAction` keep the untyped
 `func(ctx, rsckit.Args) (any, error)` form.
