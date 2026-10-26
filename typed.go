@@ -37,6 +37,7 @@ var (
 	rawType     = reflect.TypeFor[json.RawMessage]()
 	marshaler   = reflect.TypeFor[json.Marshaler]()
 	textMarsh   = reflect.TypeFor[encoding.TextMarshaler]()
+	describer   = reflect.TypeFor[interface{ JSONSchema() Schema }]()
 )
 
 // Handle registers an ordinary Go function under name, typed.
@@ -52,6 +53,8 @@ var (
 //
 // The parameter and result types are written to rsc-host.json, so the app's
 // rpc('Orders.recent', 5) is typed as returning Order[] and rejects a string.
+// A type with its own MarshalJSON is unknown there unless it has a
+// JSONSchema() Schema method, which is then its schema.
 // It panics on a value that is not such a function, at startup, where the
 // mistake is.
 func (r *Registry) Handle(name string, fn any) {
@@ -212,6 +215,12 @@ func (d *defs) of(t reflect.Type) Schema {
 		return Schema{"anyOf": []any{d.of(t.Elem()), Schema{"type": "null"}}}
 	}
 
+	// A type that says what it writes is taken at its word, before anything
+	// else is asked of it - its MarshalJSON included, which says nothing.
+	if t.Implements(describer) || reflect.PointerTo(t).Implements(describer) {
+		return reflect.New(t).Interface().(interface{ JSONSchema() Schema }).JSONSchema()
+	}
+
 	if t == timeType {
 		return Schema{"type": "string", "format": "date-time"}
 	}
@@ -220,7 +229,8 @@ func (d *defs) of(t reflect.Type) Schema {
 		return Schema{}
 	}
 
-	// A type that writes its own JSON says nothing about its shape.
+	// A type that writes its own JSON says nothing about its shape, unless
+	// it has a JSONSchema method.
 	if t.Implements(marshaler) || reflect.PointerTo(t).Implements(marshaler) {
 		return Schema{}
 	}
