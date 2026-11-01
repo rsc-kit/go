@@ -83,6 +83,12 @@ func main() {
 		return "ok"
 	})
 
+	reg.Handle("Conformance.flash", func(ctx context.Context) string {
+		rsckit.Flash(ctx, rsckit.FlashSuccess, "Saved.")
+
+		return "ok"
+	})
+
 	reg.Handle("Conformance.double", func(n int) int { return n * 2 })
 
 	reg.Handle("Conformance.invalidNested", func() error {

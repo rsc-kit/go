@@ -308,6 +308,27 @@ reg.HandleAction("authLogin", "Auth.login", func(ctx context.Context, in Login) 
 From an action or a guard: a read in a batch has had its headers sent before
 it ran, so a cookie set there is logged and dropped.
 
+`rsckit.Flash(ctx, kind, message)` leaves a message for the page the visitor
+lands on next, shown once by `useFlash()` from `@rsc-kit/core/useFlash` (0.30.39
+or later) - the same message a JavaScript action's `flash()` leaves:
+
+```go
+reg.HandleAction("invoicesSend", "Invoices.send", func(ctx context.Context, id int) error {
+	if err := invoices.Send(ctx, id); err != nil {
+		return err
+	}
+	rsckit.Flash(ctx, rsckit.FlashSuccess, "Invoice sent.")
+
+	return rsckit.Redirect("/invoices")
+})
+```
+
+The kinds are `FlashSuccess`, `FlashError`, `FlashInfo` and `FlashWarning`.
+It is a cookie, so the same rule applies: from an action or a guard. The
+browser reads it, so it is not `HttpOnly` - nothing secret goes in a flash. A
+message the visitor still carries, and one left earlier in the call, are kept
+ahead of it.
+
 ## Batches
 
 Calls the renderer issued in one tick of a render — sibling components each
