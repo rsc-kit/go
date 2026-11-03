@@ -89,6 +89,14 @@ func main() {
 		return "ok"
 	})
 
+	// Where an app loads its session it says so; here there is no store,
+	// only the mark.
+	reg.Handle("Conformance.session", func(ctx context.Context) string {
+		rsckit.TouchedSession(ctx)
+
+		return "ok"
+	})
+
 	reg.Handle("Conformance.double", func(n int) int { return n * 2 })
 
 	reg.Handle("Conformance.invalidNested", func() error {
