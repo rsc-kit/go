@@ -247,7 +247,7 @@ func TestARefusalCarriesItsDataOnTheWire(t *testing.T) {
 
 	body, _ := json.Marshal(reply)
 
-	if want := `{"error":"Still in use","touchedSession":false,"refusalStatus":409,"refusalData":{"blockers":[{"id":7,"href":"/orders/7"}]}}`; string(body) != want {
+	if want := `{"error":"Still in use","refusalStatus":409,"refusalData":{"blockers":[{"id":7,"href":"/orders/7"}]}}`; string(body) != want {
 		t.Fatalf("reply = %s\nwant %s", body, want)
 	}
 
@@ -255,7 +255,7 @@ func TestARefusalCarriesItsDataOnTheWire(t *testing.T) {
 	_, plain := replyFor(Refuse(429, "Slow down."))
 	body, _ = json.Marshal(plain)
 
-	if want := `{"error":"Slow down.","touchedSession":false,"refusalStatus":429}`; string(body) != want {
+	if want := `{"error":"Slow down.","refusalStatus":429}`; string(body) != want {
 		t.Fatalf("reply = %s\nwant %s", body, want)
 	}
 }

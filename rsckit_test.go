@@ -207,35 +207,6 @@ func TestReportsWhatAFunctionInvalidated(t *testing.T) {
 	}
 }
 
-// A call that minted a CSRF token into the session says so, refused or not:
-// on a page a shared cache keeps, that token would reach every visitor.
-func TestSaysWhenACallTouchedTheSession(t *testing.T) {
-	h := handler(t, func(r *Registry) {
-		r.Register("Forms.token", func(ctx context.Context, _ Args) (any, error) {
-			TouchedSession(ctx)
-
-			return "t", nil
-		})
-		r.Register("Forms.refuse", func(ctx context.Context, _ Args) (any, error) {
-			TouchedSession(ctx)
-
-			return nil, &AuthorizationError{Message: "no"}
-		})
-		r.Register("Orders.recent", func(context.Context, Args) (any, error) { return nil, nil })
-	})
-
-	for name, want := range map[string]bool{"Forms.token": true, "Forms.refuse": true, "Orders.recent": false} {
-		var raw map[string]any
-		if err := json.Unmarshal(post(h, `{"function":"`+name+`","args":[]}`, nil).Body.Bytes(), &raw); err != nil {
-			t.Fatal(err)
-		}
-		// Said either way: a reply without it is read as touched.
-		if got, ok := raw["touchedSession"].(bool); !ok || got != want {
-			t.Errorf("%s: touchedSession = %v, want %v", name, raw["touchedSession"], want)
-		}
-	}
-}
-
 func TestBindReportsTooFewArgumentsRatherThanZeroValues(t *testing.T) {
 	var got error
 

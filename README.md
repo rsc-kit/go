@@ -308,13 +308,6 @@ reg.HandleAction("authLogin", "Auth.login", func(ctx context.Context, in Login) 
 From an action or a guard: a read in a batch has had its headers sent before
 it ran, so a cookie set there is logged and dropped.
 
-`rsckit.TouchedSession(ctx)` says a call read or wrote the visitor's session.
-Call it where your session is loaded - the store wrapper or middleware - rather
-than in each function. It matters only on a page a shared cache may keep
-(`export const revalidate`): its calls arrive with no
-cookie, and a CSRF token minted into the empty session would reach every
-visitor of the copy, so the renderer sends that page private instead.
-
 `rsckit.Flash(ctx, kind, message)` leaves a message for the page the visitor
 lands on next, shown once by `useFlash()` from `@rsc-kit/core/useFlash` (0.30.39
 or later) - the same message a JavaScript action's `flash()` leaves:
@@ -372,6 +365,14 @@ forwarded before any page is asked. Or Go faces it:
 a renderer on a unix socket), `NewHandler(renderer, callback, path)` routes the
 callback path to the endpoint and everything else to it, and both honour the
 markers that keep a url neither side owns from bouncing between them.
+
+Your own routes - a form post, an upload, anything that changes state with the
+visitor's cookie - need cross-site request forgery protection, and Go 1.25 has
+it without a token: wrap them in `http.NewCrossOriginProtection().Handler(mux)`.
+It refuses a cross-site browser request by `Sec-Fetch-Site` (or `Origin` against
+`Host`) and lets callers that are not browsers through, so a webhook still
+arrives. The callback endpoint needs none: it is answered only with the shared
+secret, which a browser cannot be made to send.
 
 ## Conformance
 
