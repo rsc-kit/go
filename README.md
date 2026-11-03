@@ -311,7 +311,7 @@ it ran, so a cookie set there is logged and dropped.
 `rsckit.TouchedSession(ctx)` says a call read or wrote the visitor's session.
 Call it where your session is loaded - the store wrapper or middleware - rather
 than in each function. It matters only on a page a shared cache may keep
-(`export const revalidate`, `@rsc-kit/core` 0.30.40): its calls arrive with no
+(`export const revalidate`): its calls arrive with no
 cookie, and a CSRF token minted into the empty session would reach every
 visitor of the copy, so the renderer sends that page private instead.
 

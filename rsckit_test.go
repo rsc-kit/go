@@ -225,8 +225,13 @@ func TestSaysWhenACallTouchedTheSession(t *testing.T) {
 	})
 
 	for name, want := range map[string]bool{"Forms.token": true, "Forms.refuse": true, "Orders.recent": false} {
-		if got := decode(t, post(h, `{"function":"`+name+`","args":[]}`, nil)).TouchedSession; got != want {
-			t.Errorf("%s: touchedSession = %v, want %v", name, got, want)
+		var raw map[string]any
+		if err := json.Unmarshal(post(h, `{"function":"`+name+`","args":[]}`, nil).Body.Bytes(), &raw); err != nil {
+			t.Fatal(err)
+		}
+		// Said either way: a reply without it is read as touched.
+		if got, ok := raw["touchedSession"].(bool); !ok || got != want {
+			t.Errorf("%s: touchedSession = %v, want %v", name, raw["touchedSession"], want)
 		}
 	}
 }

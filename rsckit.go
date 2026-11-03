@@ -453,10 +453,12 @@ type callReply struct {
 	Result     any      `json:"result,omitempty"`
 	Error      string   `json:"error,omitempty"`
 	Revalidate []string `json:"revalidate,omitempty"`
-	// TouchedSession is set when the call read or wrote the session - see
+	// TouchedSession says whether the call read or wrote the session - see
 	// TouchedSession() - on any outcome: a call that minted a token and then
-	// refused still minted it.
-	TouchedSession   bool                `json:"touchedSession,omitempty"`
+	// refused still minted it. Always written, false included: the renderer
+	// reads a reply that does not say as one that did, and keeps the page
+	// private rather than guess.
+	TouchedSession   bool                `json:"touchedSession"`
 	ValidationErrors map[string][]string `json:"validationErrors,omitempty"`
 	Unauthenticated  bool                `json:"unauthenticated,omitempty"`
 	Unauthorized     bool                `json:"unauthorized,omitempty"`
