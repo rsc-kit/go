@@ -335,6 +335,7 @@ const (
 	headerKey ctxKey = iota
 	revalidateKey
 	cookieKey
+	sessionKey
 )
 
 // HeadersFrom returns the render request's forwarded headers — the cookie and
@@ -358,6 +359,23 @@ func HeadersFrom(ctx context.Context) http.Header {
 func Revalidate(ctx context.Context, targets ...string) {
 	if box, ok := ctx.Value(revalidateKey).(*revalidations); ok {
 		box.add(targets...)
+	}
+}
+
+// TouchedSession says this call read or wrote the visitor's session. Call it
+// from whatever loads your session - the middleware or store wrapper - so
+// every function is covered without remembering to:
+//
+//	rsckit.TouchedSession(ctx)
+//
+// It matters on one kind of page: one a shared cache may keep (`export const
+// revalidate`). Its calls arrive with no cookie, and a session they write to
+// - a CSRF token minted into it - would be handed to every visitor the copy
+// is served to, so the renderer sends that page private. Anywhere else the
+// session is the visitor's own, and the mark changes nothing.
+func TouchedSession(ctx context.Context) {
+	if touched, ok := ctx.Value(sessionKey).(*atomic.Bool); ok {
+		touched.Store(true)
 	}
 }
 
@@ -432,9 +450,13 @@ type batchLine struct {
 // outcome has its own field so the renderer never reads a message to tell an
 // invalid form from a broken server, or a redirect from a result.
 type callReply struct {
-	Result           any                 `json:"result,omitempty"`
-	Error            string              `json:"error,omitempty"`
-	Revalidate       []string            `json:"revalidate,omitempty"`
+	Result     any      `json:"result,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Revalidate []string `json:"revalidate,omitempty"`
+	// TouchedSession is set when the call read or wrote the session - see
+	// TouchedSession() - on any outcome: a call that minted a token and then
+	// refused still minted it.
+	TouchedSession   bool                `json:"touchedSession,omitempty"`
 	ValidationErrors map[string][]string `json:"validationErrors,omitempty"`
 	Unauthenticated  bool                `json:"unauthenticated,omitempty"`
 	Unauthorized     bool                `json:"unauthorized,omitempty"`
@@ -774,9 +796,13 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 	box := &revalidations{}
 	ctx = context.WithValue(ctx, revalidateKey, box)
 
+	touched := &atomic.Bool{}
+	ctx = context.WithValue(ctx, sessionKey, touched)
+
 	result, err := h.call(ctx, call.Function, fn, call.Args)
 	if err != nil {
 		status, reply := replyFor(err)
+		reply.TouchedSession = touched.Load()
 
 		// A refusal is an answer and needs no trace; a failure is a bug,
 		// and its whereabouts are the whole of the next step.
@@ -787,7 +813,7 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 		return status, reply
 	}
 
-	return http.StatusOK, callReply{Result: result, Revalidate: box.all()}
+	return http.StatusOK, callReply{Result: result, Revalidate: box.all(), TouchedSession: touched.Load()}
 }
 
 // replyFor turns what a function returned into the answer on the wire.
