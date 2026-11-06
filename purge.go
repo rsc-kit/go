@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,7 +28,7 @@ import (
 // webhook, a job - in the background at once. Call Changed after your
 // transaction commits: a CDN that fetches the page between the purge and the
 // commit keeps the old data. A purge that fails is logged and never fails the
-// change: the CDN still drops its copy at s-maxage.
+// change: the CDN still drops its copy at its max-age in CDN-Cache-Control.
 
 // Purge is what a purge drops: pages carrying any of Tags, pages at Paths, or
 // everything.
@@ -80,8 +81,8 @@ func (r *Registry) currentPurger() Purger {
 // PurgeLimit tags and paths together. A tag or path too long for it is left
 // out: one would cost the whole call, and the edge keeps no page with a tag it
 // could not purge. Only a 202 is accepted. A 429 is tried once more after its
-// Retry-After (at most five seconds). client nil is a client with a
-// five-second timeout.
+// Retry-After (at most five seconds); anything else is that call lost, and the
+// rest are still sent. client nil is a client with a five-second timeout.
 func HomeportPurger(url string, client *http.Client) Purger {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
@@ -104,13 +105,13 @@ func HomeportPurger(url string, client *http.Client) Purger {
 			bodies = append(bodies, body)
 		}
 
+		var failed []error
+
 		for _, body := range bodies {
-			if err := postPurge(ctx, client, url, body, false); err != nil {
-				return err
-			}
+			failed = append(failed, postPurge(ctx, client, url, body, false))
 		}
 
-		return nil
+		return errors.Join(failed...)
 	}
 }
 
@@ -238,6 +239,6 @@ func (r *Registry) purgeNow(ctx context.Context, tags []string) {
 	defer cancel()
 
 	if err := purger(ctx, Purge{Tags: tags}); err != nil {
-		logf("rsckit: purging the CDN failed; its copy is dropped at s-maxage instead: %v", err)
+		logf("rsckit: purging the CDN failed; its copy is dropped at CDN-Cache-Control's max-age instead: %v", err)
 	}
 }

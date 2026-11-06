@@ -227,3 +227,44 @@ func TestHomeportPurgerAcceptsOnlyA202(t *testing.T) {
 		t.Fatal("a 200 was taken for accepted")
 	}
 }
+
+func TestHomeportPurgerTriesASecond429NoFurtherAndSendsTheRest(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		sizes []int
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body Purge
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		sizes = append(sizes, len(body.Tags))
+
+		if len(sizes) <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	tags := make([]string, 150)
+	for i := range tags {
+		tags[i] = "t"
+	}
+
+	if err := HomeportPurger(server.URL, nil)(context.Background(), Purge{Tags: tags}); err == nil {
+		t.Fatal("a second 429 was not an error")
+	}
+
+	// The first call and its one retry, then the second call.
+	if len(sizes) != 3 || sizes[0] != 100 || sizes[1] != 100 || sizes[2] != 50 {
+		t.Fatalf("sent %v", sizes)
+	}
+}
