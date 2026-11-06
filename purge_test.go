@@ -181,3 +181,49 @@ func TestHomeportPurgerSendsJSONInCallsOfAtMost100(t *testing.T) {
 		t.Fatal("a 400 was not an error")
 	}
 }
+
+func TestHomeportPurgerCountsTagsAndPathsTogether(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		bodies []Purge
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body Purge
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		bodies = append(bodies, body)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	paths := make([]string, 100)
+	for i := range paths {
+		paths[i] = "/p"
+	}
+
+	purge := Purge{Tags: []string{"a", "b", strings.Repeat("x", 1025)}, Paths: append(paths, strings.Repeat("/", 2049))}
+
+	if err := HomeportPurger(server.URL, nil)(context.Background(), purge); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two tags and 98 paths, then the last two; what is too long never goes.
+	if len(bodies) != 2 || len(bodies[0].Tags) != 2 || len(bodies[0].Paths) != 98 || len(bodies[1].Paths) != 2 {
+		t.Fatalf("sent %+v", bodies)
+	}
+}
+
+func TestHomeportPurgerAcceptsOnlyA202(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := HomeportPurger(server.URL, nil)(context.Background(), Purge{Tags: []string{"a"}}); err == nil {
+		t.Fatal("a 200 was taken for accepted")
+	}
+}
