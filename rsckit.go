@@ -120,6 +120,12 @@ type Registry struct {
 	// the one poller that answers them all is running.
 	waiters map[*waiter]struct{}
 	polling bool
+
+	// The purge Changed sends to a CDN - see purge.go. purgerSet is whether
+	// SetPurger chose it, nil included, over HOMEPORT_PURGE_URL's default.
+	purgeMu   sync.Mutex
+	purger    Purger
+	purgerSet bool
 }
 
 // NewRegistry returns an empty registry.
@@ -672,6 +678,17 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.WithValue(r.Context(), headerKey, forwarded)
+
+	// The names this call changes, purged from the CDN once it has answered:
+	// after the version moved, and without the renderer waiting on the edge.
+	pending := &pendingPurge{}
+	ctx = context.WithValue(ctx, purgeKey, pending)
+
+	defer func() {
+		if tags := pending.take(); len(tags) > 0 {
+			go h.registry.purgeNow(context.WithoutCancel(ctx), tags)
+		}
+	}()
 
 	// A batch: one HTTP request for a page's parallel reads rather than one
 	// each. The calls run concurrently, and each is answered the moment it
