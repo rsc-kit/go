@@ -303,6 +303,9 @@ func (r *Registry) Changed(ctx context.Context, names ...string) error {
 
 	r.wake()
 
+	// A CDN keeping pages tagged with these names drops them - see purge.go.
+	r.purgeLater(ctx, names)
+
 	return nil
 }
 

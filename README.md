@@ -164,6 +164,15 @@ reg.Versions(&rsckit.SQLVersions{DB: db, Placeholder: rsckit.Dollar})   // Postg
 
 Anything with a `Bump` and a `Versions` fits — Redis, a cache.
 
+A page kept by a CDN (`export const revalidate`) carries the `Cache-Tag` of
+every `cache()` answer it used, and the names `Changed` moves are those tags.
+With `HOMEPORT_PURGE_URL` set, `Changed` posts `{"tags": [...]}` there, so
+Homeport's edge drops those pages: inside a host call, once for every name
+the call changed after it has answered; elsewhere, in the background. Call
+`Changed` after your transaction commits. Any other CDN is
+`reg.SetPurger(func(ctx context.Context, p rsckit.Purge) error { ... })`, and
+`reg.SetPurger(nil)` sends none. A purge that fails is logged, never returned.
+
 That shared store is noticed within `ChangedPoll`. The calls held on an
 instance share one poller - one read of the store a round, for every name
 they hold together - so the reads do not grow with renderers, isolates or
