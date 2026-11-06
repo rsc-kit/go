@@ -40,8 +40,14 @@ type Purge struct {
 // Purger sends a purge to a CDN.
 type Purger func(ctx context.Context, purge Purge) error
 
-// PurgeLimit is the most tags, and the most paths, Homeport takes in one call.
+// PurgeLimit is the most tags and paths, together, Homeport takes in one call.
 const PurgeLimit = 100
+
+// The longest tag and path Homeport takes, in bytes.
+const (
+	purgeTagBytes  = 1024
+	purgePathBytes = 2048
+)
 
 // SetPurger installs the purge Changed calls. nil purges nothing, Homeport's
 // default included; without a call, the purge is HomeportPurger when
@@ -71,8 +77,11 @@ func (r *Registry) currentPurger() Purger {
 
 // HomeportPurger posts to Homeport's purge url: JSON, no token - it is
 // reachable only from inside the app's network - in calls of at most
-// PurgeLimit tags and paths. A 429 is tried once more after its Retry-After
-// (at most five seconds). client nil is a client with a five-second timeout.
+// PurgeLimit tags and paths together. A tag or path too long for it is left
+// out: one would cost the whole call, and the edge keeps no page with a tag it
+// could not purge. Only a 202 is accepted. A 429 is tried once more after its
+// Retry-After (at most five seconds). client nil is a client with a
+// five-second timeout.
 func HomeportPurger(url string, client *http.Client) Purger {
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
@@ -85,13 +94,13 @@ func HomeportPurger(url string, client *http.Client) Purger {
 			bodies = append(bodies, Purge{All: true})
 		}
 
-		tags, paths := purge.Tags, purge.Paths
+		tags, paths := fitting(purge.Tags, purgeTagBytes), fitting(purge.Paths, purgePathBytes)
 
 		for len(tags) > 0 || len(paths) > 0 {
 			var body Purge
 
-			body.Tags, tags = take(tags)
-			body.Paths, paths = take(paths)
+			body.Tags, tags = take(tags, PurgeLimit)
+			body.Paths, paths = take(paths, PurgeLimit-len(body.Tags))
 			bodies = append(bodies, body)
 		}
 
@@ -105,12 +114,24 @@ func HomeportPurger(url string, client *http.Client) Purger {
 	}
 }
 
-func take(list []string) ([]string, []string) {
-	if len(list) <= PurgeLimit {
+func take(list []string, n int) ([]string, []string) {
+	if len(list) <= n {
 		return list, nil
 	}
 
-	return list[:PurgeLimit], list[PurgeLimit:]
+	return list[:n], list[n:]
+}
+
+func fitting(list []string, limit int) []string {
+	var fit []string
+
+	for _, item := range list {
+		if len(item) <= limit {
+			fit = append(fit, item)
+		}
+	}
+
+	return fit
 }
 
 func postPurge(ctx context.Context, client *http.Client, url string, body Purge, retried bool) error {
@@ -134,7 +155,7 @@ func postPurge(ctx context.Context, client *http.Client, url string, body Purge,
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
 
-	if response.StatusCode >= 200 && response.StatusCode < 300 {
+	if response.StatusCode == http.StatusAccepted {
 		return nil
 	}
 
