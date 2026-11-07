@@ -130,6 +130,22 @@ the first refusal. A name nothing is registered for is a refusal, not a pass:
 a declared check that silently does not happen is the failure this exists to
 prevent.
 
+A guard is asked about the page, not the call carrying it.
+`rsckit.PageFrom(ctx)` is that page: `URL`, what the visitor asked for under
+the public host, and `Params`, only what the route's segments bound - never
+the query. `rsckit.ClientIP(ctx)` is the visitor's address, so a throttle
+counts each visitor; one page load asks once.
+
+```go
+reg.Middleware("owns-order", func(ctx context.Context, _ string) error {
+	page, _ := rsckit.PageFrom(ctx)
+	if !owns(ctx, page.Params["order"]) {
+		return rsckit.Unauthorized("not your order")
+	}
+	return nil
+})
+```
+
 ## Saying data changed
 
 A section that says what it refreshes on refreshes in every open tab the
@@ -391,6 +407,8 @@ limit; a larger one is refused with 413.
   extra ones are ignored.
 - `rsckit.HeadersFrom(ctx)` has the forwarded `Cookie` and `Authorization`.
   Empty during a build-time render, which has no visitor.
+- `rsckit.ClientIP(ctx)` is the visitor's address, read from
+  `X-Rsc-Client-Ip` only once the secret matched. Empty with no visitor.
 - A panic becomes an error for that one call. It does not take down the
   server, and every other render in flight survives it — including a panic
   in a result's own `MarshalJSON`. The panic is logged with its stack

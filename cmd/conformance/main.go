@@ -12,6 +12,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -90,6 +91,8 @@ func main() {
 		return strings.Join(rsckit.HeadersFrom(ctx).Values("Cookie"), "; ")
 	})
 
+	reg.Handle("Conformance.ip", func(ctx context.Context) string { return rsckit.ClientIP(ctx) })
+
 	reg.Handle("Conformance.login", func(ctx context.Context) string {
 		rsckit.SetCookie(ctx, &http.Cookie{Name: "conformance_login", Value: "1", Path: "/", HttpOnly: true})
 
@@ -114,6 +117,18 @@ func main() {
 	reg.Middleware("conformance-allow", func(context.Context, string) error { return nil })
 	reg.Middleware("conformance-deny", func(context.Context, string) error { return rsckit.Unauthorized() })
 	reg.Middleware("conformance-redirect", func(context.Context, string) error { return rsckit.Redirect("/conformance-login") })
+	reg.Middleware("conformance-page", func(ctx context.Context, _ string) error {
+		page, ok := rsckit.PageFrom(ctx)
+		if !ok || page.Params["order"] != "7" {
+			return rsckit.Unauthorized()
+		}
+
+		if u, err := url.Parse(page.URL); err != nil || u.Path != "/conformance/orders/7" {
+			return rsckit.Unauthorized()
+		}
+
+		return nil
+	})
 
 	if *manifest != "" {
 		if err := reg.WriteManifest(*manifest); err != nil {
