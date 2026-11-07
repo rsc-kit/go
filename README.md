@@ -255,6 +255,34 @@ slice or map in a typed function's result is sent as `[]` or `{}`, as its type
 says, never `null`; a nil pointer is `null`. `Register` and `RegisterAction` keep the untyped
 `func(ctx, rsckit.Args) (any, error)` form.
 
+A public form can be drawn from a typed function, with no schema on the
+TypeScript side. Take a struct, and its field order is the form's:
+
+```go
+type ContactInput struct {
+	Name  string `json:"name" validate:"required,min=2"`
+	Email string `json:"email" validate:"required,email"`
+	Topic string `json:"topic" validate:"required,oneof=sales support"`
+}
+
+reg.Handle("Contact.send", func(in ContactInput) (string, error) {
+	if taken(in.Email) {
+		return "", rsckit.InvalidField("email", "That address is taken.")
+	}
+
+	return "sent", nil
+})
+```
+
+```ts
+export const contact = defineForm({ name: 'contact', action: 'Contact.send', theme: shadcn, done: 'Thanks.' })
+```
+
+`validate` tags become the browser's hints and nothing more: this package
+does not check them, so the function still has to, and its refusal lands under
+the field. A tag the browser cannot use is left out. `defineForm` is in
+`@rsc-kit/press/forms`, from 0.30.48.
+
 ## Server actions
 
 ```go
