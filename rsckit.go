@@ -244,6 +244,18 @@ func (r *Registry) runGuards(ctx context.Context, args Args) (any, error) {
 		return nil, err
 	}
 
+	// The page, sent beside the names since engine 0.30.50.
+	if args.Len() > 1 {
+		var page Page
+		if err := json.Unmarshal(args[1], &page); err == nil {
+			if page.Params == nil {
+				page.Params = map[string]string{}
+			}
+
+			ctx = context.WithValue(ctx, pageKey, page)
+		}
+	}
+
 	for _, full := range names {
 		name, param, _ := strings.Cut(full, ":")
 
@@ -341,7 +353,46 @@ const (
 	headerKey ctxKey = iota
 	revalidateKey
 	cookieKey
+	clientIPKey
+	pageKey
 )
+
+// ClientIPHeader carries the visitor's address on every host call the
+// renderer makes for a request: the peer its server saw, or the first hop of
+// X-Forwarded-For when RSC_TRUST_FORWARDED=1 says a proxy of its own wrote it.
+const ClientIPHeader = "X-Rsc-Client-Ip"
+
+// ClientIP is the address of the visitor the call is being made for - what a
+// rate limit keys on. The call itself comes from the renderer, so
+// r.RemoteAddr is the renderer's own address and the same for everyone; this
+// is the one the renderer sent, believed because the call carried the secret.
+//
+// Empty when the renderer did not know it: a build-time render, or an engine
+// before 0.30.50.
+func ClientIP(ctx context.Context) string {
+	ip, _ := ctx.Value(clientIPKey).(string)
+
+	return ip
+}
+
+// Page is what a route guard is asked about: the url the visitor asked for,
+// as they typed it, and the params its route matched.
+type Page struct {
+	URL    string            `json:"url"`
+	Params map[string]string `json:"params"`
+}
+
+// PageFrom is the page a guard is running for. The call is a POST from the
+// renderer, so the request it arrives on says nothing about the page; this is
+// what the renderer sent beside the guard names.
+//
+// False outside a guard, and from an engine before 0.30.50, which sent no page
+// - a guard that needs one should refuse rather than pass without it.
+func PageFrom(ctx context.Context) (Page, bool) {
+	page, ok := ctx.Value(pageKey).(Page)
+
+	return page, ok
+}
 
 // HeadersFrom returns the render request's forwarded headers — the cookie and
 // authorization of the person the page is being rendered for.
@@ -678,6 +729,12 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.WithValue(r.Context(), headerKey, forwarded)
+
+	// Past the secret, so the renderer may be believed about who it is
+	// calling for.
+	if ip := strings.TrimSpace(r.Header.Get(ClientIPHeader)); ip != "" {
+		ctx = context.WithValue(ctx, clientIPKey, ip)
+	}
 
 	// The names this call changes, purged from the CDN once it has answered:
 	// after the version moved, and without the renderer waiting on the edge.
