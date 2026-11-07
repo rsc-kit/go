@@ -296,6 +296,10 @@ func (d *defs) fields(t reflect.Type) Schema {
 	properties := Schema{}
 	required := []string{}
 	order := []string{}
+	// Go's field names, which validate's cross-field rules say, to the json
+	// names a form knows the fields by.
+	jsonNames := map[string]string{}
+	conditions := map[string]string{}
 
 	for _, f := range reflect.VisibleFields(t) {
 		if !f.IsExported() || f.Anonymous && f.Type.Kind() == reflect.Struct && f.Tag.Get("json") == "" {
@@ -321,6 +325,13 @@ func (d *defs) fields(t reflect.Type) Schema {
 		hint(schema, rules)
 		properties[name] = schema
 		order = append(order, name)
+		jsonNames[f.Name] = name
+
+		for _, rule := range rules {
+			if value, ok := strings.CutPrefix(rule, "required_if="); ok {
+				conditions[name] = value
+			}
+		}
 
 		optional := strings.Contains(opts, "omitempty") || strings.Contains(opts, "omitzero")
 		if slices.Contains(rules, "omitempty") {
@@ -331,6 +342,18 @@ func (d *defs) fields(t reflect.Type) Schema {
 
 		if !optional {
 			required = append(required, name)
+		}
+	}
+
+	// required_if=Topic sales: the field is asked only while Topic is sales,
+	// and required then - so a form shows it then. Only one field and one
+	// value: several pairs must all hold, which a form cannot say as one.
+	for name, condition := range conditions {
+		pair := strings.Fields(condition)
+		when, known := jsonNames[pairField(pair)]
+
+		if len(pair) == 2 && known {
+			properties[name].(Schema)["x-visible"] = Schema{"when": when, "is": []any{pair[1]}, "required": true}
 		}
 	}
 
@@ -425,6 +448,14 @@ func setLimit(schema Schema, value string, keys ...string) {
 	for _, key := range keys {
 		schema[key] = limit
 	}
+}
+
+func pairField(pair []string) string {
+	if len(pair) == 0 {
+		return ""
+	}
+
+	return pair[0]
 }
 
 // oneofValue is a word, or several in single quotes, as validator reads them.

@@ -28,6 +28,8 @@ type formInput struct {
 	Name  string `json:"name" validate:"required,min=2"`
 	Email string `json:"email" validate:"required,email"`
 	Topic string `json:"topic" validate:"required,oneof=sales support"`
+	// Asked only of support requests: a form shows it while topic is support.
+	Company string `json:"company,omitempty" validate:"required_if=Topic support"`
 }
 
 func main() {

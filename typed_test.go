@@ -393,3 +393,32 @@ func TestAValidateTagIsAFormsHint(t *testing.T) {
 		t.Errorf("required = %v\nwant %v", out["required"], wantRequired)
 	}
 }
+
+type tAccount struct {
+	Kind    string `json:"kind" validate:"required,oneof=person business"`
+	Company string `json:"company,omitempty" validate:"required_if=Kind business,omitempty,min=2"`
+	Both    string `json:"both,omitempty" validate:"required_if=Kind business Company acme"`
+	Ghost   string `json:"ghost,omitempty" validate:"required_if=Missing yes"`
+}
+
+func TestRequiredIfIsShownWhenAndRequiredThen(t *testing.T) {
+	d := &defs{byType: map[reflect.Type]string{}, schemas: map[string]Schema{}}
+	out := d.fields(reflect.TypeFor[tAccount]())
+	fields := out["properties"].(Schema)
+
+	want := Schema{"when": "kind", "is": []any{"business"}, "required": true}
+	if got := fields["company"].(Schema)["x-visible"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("company x-visible = %#v\nwant %#v", got, want)
+	}
+
+	// Two pairs must both hold, and a field the struct does not have says nothing.
+	for _, name := range []string{"both", "ghost"} {
+		if got, ok := fields[name].(Schema)["x-visible"]; ok {
+			t.Errorf("%s has x-visible %#v", name, got)
+		}
+	}
+
+	if !reflect.DeepEqual(out["required"], []string{"kind"}) {
+		t.Errorf("required = %v: a field required only sometimes is not always required", out["required"])
+	}
+}
