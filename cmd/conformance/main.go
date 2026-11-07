@@ -68,6 +68,16 @@ func main() {
 
 		return in.Name, nil
 	})
+	// An admin panel's update: the values, then which record. The address
+	// belongs to record 7, which may keep it, as a unique rule ignoring the
+	// record being edited lets it.
+	reg.Handle("Conformance.update", func(in formInput, key string) (string, error) {
+		if in.Email == "taken@example.com" && key != "7" {
+			return "", rsckit.InvalidField("email", "That address is taken.")
+		}
+
+		return key + ":" + in.Name, nil
+	})
 	reg.Handle("Conformance.invalid", func() error { return rsckit.InvalidField("name", "The name field is required.") })
 	reg.Handle("Conformance.redirect", func() error { return rsckit.Redirect("/login") })
 
