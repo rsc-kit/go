@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -292,6 +295,7 @@ func (d *defs) object(t reflect.Type) Schema {
 func (d *defs) fields(t reflect.Type) Schema {
 	properties := Schema{}
 	required := []string{}
+	order := []string{}
 
 	for _, f := range reflect.VisibleFields(t) {
 		if !f.IsExported() || f.Anonymous && f.Type.Kind() == reflect.Struct && f.Tag.Get("json") == "" {
@@ -313,21 +317,142 @@ func (d *defs) fields(t reflect.Type) Schema {
 			schema = Schema{"type": "string"}
 		}
 
+		rules := validateRules(f.Tag.Get("validate"))
+		hint(schema, rules)
 		properties[name] = schema
+		order = append(order, name)
 
-		if !strings.Contains(opts, "omitempty") && !strings.Contains(opts, "omitzero") {
+		optional := strings.Contains(opts, "omitempty") || strings.Contains(opts, "omitzero")
+		if slices.Contains(rules, "omitempty") {
+			optional = true
+		} else if slices.Contains(rules, "required") {
+			optional = false
+		}
+
+		if !optional {
 			required = append(required, name)
 		}
 	}
 
 	sort.Strings(required)
 
-	out := Schema{"type": "object", "properties": properties}
+	// A Schema is a map, which JSON writes sorted, and a form is drawn in the
+	// order the struct declares.
+	out := Schema{"type": "object", "properties": properties, "x-order": order}
 	if len(required) > 0 {
 		out["required"] = required
 	}
 
 	return out
+}
+
+// validateRules is a field's validate tag, up to where it stops describing the
+// field: dive's rules are about its elements. A rule with alternatives (a|b)
+// says neither for certain, so it is left out.
+func validateRules(tag string) []string {
+	var rules []string
+
+	for _, rule := range strings.Split(tag, ",") {
+		if rule == "dive" {
+			break
+		}
+
+		if rule != "" && !strings.Contains(rule, "|") {
+			rules = append(rules, rule)
+		}
+	}
+
+	return rules
+}
+
+// hint adds what a form can tell a visitor before it is sent, read from the
+// validate tag go-playground/validator made the convention. It is a
+// description and nothing more: this package does not depend on a validator
+// or run one, so the function still checks what it was sent.
+func hint(schema Schema, rules []string) {
+	if options, ok := schema["anyOf"].([]any); ok && len(options) > 0 {
+		if inner, ok := options[0].(Schema); ok {
+			hint(inner, rules)
+		}
+
+		return
+	}
+
+	kind, _ := schema["type"].(string)
+	number := kind == "integer" || kind == "number"
+
+	if !number && kind != "string" {
+		return
+	}
+
+	low, high := "minLength", "maxLength"
+	if number {
+		low, high = "minimum", "maximum"
+	}
+
+	for _, rule := range rules {
+		name, value, _ := strings.Cut(rule, "=")
+
+		switch name {
+		case "min", "gte":
+			setLimit(schema, value, low)
+		case "max", "lte":
+			setLimit(schema, value, high)
+		case "len", "eq":
+			if name == "len" || number {
+				setLimit(schema, value, low, high)
+			}
+		case "oneof":
+			setEnum(schema, value, number)
+		case "email":
+			schema["format"] = "email"
+		case "url", "http_url", "uri":
+			schema["format"] = "uri"
+		case "datetime":
+			if value == time.DateOnly {
+				schema["format"] = "date"
+			}
+		}
+	}
+}
+
+func setLimit(schema Schema, value string, keys ...string) {
+	limit, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return
+	}
+
+	for _, key := range keys {
+		schema[key] = limit
+	}
+}
+
+// oneofValue is a word, or several in single quotes, as validator reads them.
+var oneofValue = regexp.MustCompile(`'[^']*'|\S+`)
+
+func setEnum(schema Schema, value string, number bool) {
+	options := []any{}
+
+	for _, option := range oneofValue.FindAllString(value, -1) {
+		option = strings.Trim(option, "'")
+
+		if !number {
+			options = append(options, option)
+
+			continue
+		}
+
+		n, err := strconv.ParseFloat(option, 64)
+		if err != nil {
+			return
+		}
+
+		options = append(options, n)
+	}
+
+	if len(options) > 0 {
+		schema["enum"] = options
+	}
 }
 
 func pathTail(path string) string {

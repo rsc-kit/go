@@ -341,3 +341,55 @@ func TestHandleRefusesWhatIsNotAFunction(t *testing.T) {
 
 	NewRegistry().Handle("Nope", 42)
 }
+
+type tContact struct {
+	Email string   `json:"email" validate:"required,email,max=255"`
+	Site  *string  `json:"site,omitempty" validate:"omitempty,url"`
+	Code  string   `json:"code" validate:"len=6"`
+	Seats int      `json:"seats" validate:"gte=1,lte=10"`
+	Topic string   `json:"topic,omitempty" validate:"required,oneof=sales 'after hours'"`
+	Stars int      `json:"stars" validate:"oneof=1 2 3"`
+	Born  string   `json:"born" validate:"datetime=2006-01-02"`
+	Note  string   `json:"note" validate:"omitempty,min=10"`
+	Who   string   `json:"who" validate:"email|uuid"`
+	Tags  []string `json:"tags" validate:"min=1,dive,max=5"`
+}
+
+func TestAValidateTagIsAFormsHint(t *testing.T) {
+	d := &defs{byType: map[reflect.Type]string{}, schemas: map[string]Schema{}}
+	out := d.fields(reflect.TypeFor[tContact]())
+	fields := out["properties"].(Schema)
+
+	want := map[string]Schema{
+		"email": {"type": "string", "format": "email", "maxLength": 255.0},
+		"code":  {"type": "string", "minLength": 6.0, "maxLength": 6.0},
+		"seats": {"type": "integer", "minimum": 1.0, "maximum": 10.0},
+		"topic": {"type": "string", "enum": []any{"sales", "after hours"}},
+		"stars": {"type": "integer", "enum": []any{1.0, 2.0, 3.0}},
+		"born":  {"type": "string", "format": "date"},
+		"note":  {"type": "string", "minLength": 10.0},
+		"who":   {"type": "string"},
+		"tags":  {"type": "array", "items": Schema{"type": "string"}},
+	}
+
+	for name, schema := range want {
+		if !reflect.DeepEqual(fields[name], schema) {
+			t.Errorf("%s = %#v\nwant %#v", name, fields[name], schema)
+		}
+	}
+
+	site := fields["site"].(Schema)["anyOf"].([]any)[0].(Schema)
+	if site["format"] != "uri" {
+		t.Errorf("a pointer's rules did not reach what it points at: %v", site)
+	}
+
+	wantOrder := []string{"email", "site", "code", "seats", "topic", "stars", "born", "note", "who", "tags"}
+	if !reflect.DeepEqual(out["x-order"], wantOrder) {
+		t.Errorf("x-order = %v\nwant %v", out["x-order"], wantOrder)
+	}
+
+	wantRequired := []string{"born", "code", "email", "seats", "stars", "tags", "topic", "who"}
+	if !reflect.DeepEqual(out["required"], wantRequired) {
+		t.Errorf("required = %v\nwant %v", out["required"], wantRequired)
+	}
+}
