@@ -23,6 +23,12 @@ type Row struct {
 	ID int `json:"id"`
 }
 
+type formInput struct {
+	Name  string `json:"name" validate:"required,min=2"`
+	Email string `json:"email" validate:"required,email"`
+	Topic string `json:"topic" validate:"required,oneof=sales support"`
+}
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8123", "where to listen")
 	secret := flag.String("secret", "test", "the shared secret")
@@ -53,6 +59,13 @@ func main() {
 		return rsckit.RefuseWith(http.StatusConflict, "Still in use", map[string]any{
 			"blockers": []map[string]any{{"id": 7, "href": "/orders/7"}},
 		})
+	})
+	reg.Handle("Conformance.form", func(in formInput) (string, error) {
+		if in.Email == "taken@example.com" {
+			return "", rsckit.InvalidField("email", "That address is taken.")
+		}
+
+		return in.Name, nil
 	})
 	reg.Handle("Conformance.invalid", func() error { return rsckit.InvalidField("name", "The name field is required.") })
 	reg.Handle("Conformance.redirect", func() error { return rsckit.Redirect("/login") })
