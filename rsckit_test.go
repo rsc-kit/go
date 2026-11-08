@@ -125,6 +125,40 @@ func TestRefusesACallWithTheWrongSecret(t *testing.T) {
 	}
 }
 
+// A rotation: the backend takes the new secret and the old one, the renderers
+// roll to the new one, and RSC_HOST_CALL_SECRET_PREVIOUS is removed.
+func TestAnswersThePreviousSecretWhileItIsSet(t *testing.T) {
+	register := func(r *Registry) {
+		r.Register("X.y", func(context.Context, Args) (any, error) { return "ok", nil })
+	}
+	call := func(h http.Handler, given string) int {
+		return post(h, `{"function":"X.y","args":[]}`, map[string]string{SecretHeader: given}).Code
+	}
+
+	if code := call(handler(t, register), "old"); code != http.StatusForbidden {
+		t.Fatalf("without it set, status = %d, want 403", code)
+	}
+
+	t.Setenv("RSC_HOST_CALL_SECRET_PREVIOUS", "old")
+	h := handler(t, register)
+
+	if code := call(h, "old"); code != http.StatusOK {
+		t.Fatalf("previous secret: status = %d, want 200", code)
+	}
+	if code := call(h, secret); code != http.StatusOK {
+		t.Fatalf("current secret: status = %d, want 200", code)
+	}
+	if code := call(h, "nope"); code != http.StatusForbidden {
+		t.Fatalf("wrong secret: status = %d, want 403", code)
+	}
+
+	// Set but empty is unset: it must not let an empty header through.
+	t.Setenv("RSC_HOST_CALL_SECRET_PREVIOUS", "")
+	if code := call(handler(t, register), ""); code != http.StatusForbidden {
+		t.Fatalf("empty previous: status = %d, want 403", code)
+	}
+}
+
 func TestACallbackHandlerNeedsASecret(t *testing.T) {
 	if _, err := NewCallbackHandler(NewRegistry(), ""); err != ErrNoSecret {
 		t.Fatalf("err = %v, want ErrNoSecret", err)

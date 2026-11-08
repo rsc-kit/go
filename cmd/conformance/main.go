@@ -2,8 +2,8 @@
 // calls, written with this package's ordinary API, so the suite checks what
 // an app built on it would send:
 //
-//	RSC_PURGE_URL=http://127.0.0.1:8790/ go run ./cmd/conformance -addr 127.0.0.1:8123 -secret test -manifest rsc-host.json &
-//	npx -y -p @rsc-kit/core rsc-kit-conformance --endpoint http://127.0.0.1:8123/__rsc/host-call --secret test --manifest rsc-host.json --purge-port 8790
+//	RSC_PURGE_URL=http://127.0.0.1:8790/ RSC_HOST_CALL_SECRET_PREVIOUS=old go run ./cmd/conformance -addr 127.0.0.1:8123 -secret test -manifest rsc-host.json &
+//	npx -y -p @rsc-kit/core rsc-kit-conformance --endpoint http://127.0.0.1:8123/__rsc/host-call --secret test --previous-secret old --manifest rsc-host.json --purge-port 8790
 package main
 
 import (
