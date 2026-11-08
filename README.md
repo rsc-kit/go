@@ -41,13 +41,21 @@ http.Handle("POST /__rsc/host-call", callback)
 // The package never builds a server, so its timeouts are yours. Without
 // them a client that sends its headers a byte at a time holds a goroutine
 // for as long as it likes.
+// PORT when the platform names one, 8080 otherwise, on every address: a
+// host that sends backend urls straight here (backendPaths) reaches it at
+// the machine's own address, not loopback. RSC_BACKEND stays
+// http://127.0.0.1:8080 - the renderer still calls over loopback.
 server := &http.Server{
-    Addr:              "127.0.0.1:8080",
+    Addr:              ":" + cmp.Or(os.Getenv("PORT"), "8080"),
     ReadHeaderTimeout: 5 * time.Second,
     IdleTimeout:       120 * time.Second,
 }
 log.Fatal(server.ListenAndServe())
 ```
+
+Every address means the host-call endpoint is reachable from the network as
+well as from the renderer. The secret is what guards it, and a proxy in front
+should still refuse `/__rsc/host-call` from outside.
 
 The JavaScript side is what `bunx rsc-kit@latest init` writes in the
 directory with `go.mod` (or `bun create rsc-kit@latest my-app
