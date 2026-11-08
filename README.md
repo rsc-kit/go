@@ -182,8 +182,9 @@ Anything with a `Bump` and a `Versions` fits — Redis, a cache.
 
 A page kept by a CDN (`export const revalidate`) carries the `Cache-Tag` of
 every `cache()` answer it used, and the names `Changed` moves are those tags.
-With `HOMEPORT_PURGE_URL` set, `Changed` posts `{"tags": [...]}` there, so
-Homeport's edge drops those pages: inside a host call, once for every name
+With `RSC_PURGE_URL` set, `Changed` posts `{"tags": [...]}` there, so the
+edge drops those pages (on Homeport, which sets `HOMEPORT_PURGE_URL`, that is
+read instead): inside a host call, once for every name
 the call changed after it has answered; elsewhere, in the background. Call
 `Changed` after your transaction commits. Any other CDN is
 `reg.SetPurger(func(ctx context.Context, p rsckit.Purge) error { ... })`, and
