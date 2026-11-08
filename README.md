@@ -41,6 +41,7 @@ http.Handle("POST /__rsc/host-call", callback)
 // The package never builds a server, so its timeouts are yours. Without
 // them a client that sends its headers a byte at a time holds a goroutine
 // for as long as it likes.
+//
 // PORT when the platform names one, 8080 otherwise, on every address: a
 // host that sends backend urls straight here (backendPaths) reaches it at
 // the machine's own address, not loopback. RSC_BACKEND stays
