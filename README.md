@@ -63,6 +63,10 @@ The renderer reads them in development (`vite`) and in production (the built
 server) and wires `rpc()` to the endpoint. There is no JavaScript to write for
 Go; [`examples/go-backend`](https://github.com/rsc-kit/rsc-kit/tree/main/examples/go-backend) in the engine's repository is the whole arrangement, runnable.
 
+To rotate the secret without a refused call, give the backend the new value
+with the old one as `RSC_HOST_CALL_SECRET_PREVIOUS` - it answers either - then
+the renderer the new value, then remove `RSC_HOST_CALL_SECRET_PREVIOUS`.
+
 ## Why there is no frame protocol here
 
 Reimplementing a host used to mean a binary framing over two unix sockets.

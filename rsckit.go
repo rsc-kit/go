@@ -665,6 +665,10 @@ var ErrNoSecret = errors.New("rsckit: a callback handler needs a shared secret")
 type CallbackHandler struct {
 	registry *Registry
 	secret   []byte
+	// previous is the secret a rotation is moving away from, answered as
+	// well while RSC_HOST_CALL_SECRET_PREVIOUS names it: the renderers keep
+	// sending it until each has rolled to the new one.
+	previous []byte
 
 	// ForwardHeaders are copied from the call onto the context a function
 	// sees. Defaults to cookie and authorization, matching the JS side.
@@ -687,9 +691,20 @@ func NewCallbackHandler(registry *Registry, secret string) (*CallbackHandler, er
 	return &CallbackHandler{
 		registry:       registry,
 		secret:         []byte(secret),
+		previous:       []byte(os.Getenv("RSC_HOST_CALL_SECRET_PREVIOUS")),
 		ForwardHeaders: []string{"Cookie", "Authorization"},
 		Debug:          os.Getenv("RSC_DEBUG") == "1",
 	}, nil
+}
+
+// holdsSecret is whether given is the secret, or the previous one while it is
+// set. Both are compared every time, so how long it takes does not say which.
+// An empty secret matches nothing.
+func (h *CallbackHandler) holdsSecret(given []byte) bool {
+	current := len(h.secret) > 0 && subtle.ConstantTimeCompare(given, h.secret) == 1
+	previous := len(h.previous) > 0 && subtle.ConstantTimeCompare(given, h.previous) == 1
+
+	return current || previous
 }
 
 func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -706,7 +721,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// two empty values is a match, so a handler built without
 	// NewCallbackHandler would admit a request that carried no secret.
 	given := []byte(r.Header.Get(SecretHeader))
-	if len(h.secret) == 0 || subtle.ConstantTimeCompare(given, h.secret) != 1 {
+	if !h.holdsSecret(given) {
 		writeReply(w, http.StatusForbidden, callReply{Error: "bad or missing host secret"})
 
 		return
