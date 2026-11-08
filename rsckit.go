@@ -122,7 +122,7 @@ type Registry struct {
 	polling bool
 
 	// The purge Changed sends to a CDN - see purge.go. purgerSet is whether
-	// SetPurger chose it, nil included, over HOMEPORT_PURGE_URL's default.
+	// SetPurger chose it, nil included, over RSC_PURGE_URL's default.
 	purgeMu   sync.Mutex
 	purger    Purger
 	purgerSet bool

@@ -19,9 +19,9 @@ import (
 // A revalidate page goes out with the Cache-Tag of every cache() answer it
 // used, and the names Changed moves are those tags. The change is made here
 // and never passes through the renderer, so this side tells the CDN itself:
-// on Homeport, where HOMEPORT_PURGE_URL is set, Changed posts
+// with RSC_PURGE_URL set, Changed posts
 //
-//	POST $HOMEPORT_PURGE_URL  {"tags": ["team:1:repos"]}
+//	POST $RSC_PURGE_URL  {"tags": ["team:1:repos"]}
 //
 // once the version has moved. Inside a host call, every name the call changed
 // goes out as one purge after its answer has been written; elsewhere - a
@@ -52,7 +52,7 @@ const (
 
 // SetPurger installs the purge Changed calls. nil purges nothing, Homeport's
 // default included; without a call, the purge is HomeportPurger when
-// HOMEPORT_PURGE_URL is set.
+// RSC_PURGE_URL is set, or the HOMEPORT_PURGE_URL Homeport sets.
 func (r *Registry) SetPurger(purger Purger) {
 	r.purgeMu.Lock()
 	defer r.purgeMu.Unlock()
@@ -69,11 +69,22 @@ func (r *Registry) currentPurger() Purger {
 		return r.purger
 	}
 
-	if url := os.Getenv("HOMEPORT_PURGE_URL"); url != "" {
+	if url := purgeURL(); url != "" {
 		return HomeportPurger(url, nil)
 	}
 
 	return nil
+}
+
+// purgeURL is where an edge in front takes its purges: RSC_PURGE_URL, or
+// HOMEPORT_PURGE_URL, the name Homeport sets on the apps it runs - read so
+// those keep purging, not as the name to set.
+func purgeURL() string {
+	if url := os.Getenv("RSC_PURGE_URL"); url != "" {
+		return url
+	}
+
+	return os.Getenv("HOMEPORT_PURGE_URL")
 }
 
 // HomeportPurger posts to Homeport's purge url: JSON, no token - it is

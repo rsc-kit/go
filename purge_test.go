@@ -94,12 +94,27 @@ func TestChangedOutsideAHostCallPurgesInTheBackground(t *testing.T) {
 	}
 }
 
+func TestRscPurgeURLComesBeforeHomeports(t *testing.T) {
+	t.Setenv("HOMEPORT_PURGE_URL", "http://homeport.internal/")
+	t.Setenv("RSC_PURGE_URL", "http://edge.internal/")
+
+	if got := purgeURL(); got != "http://edge.internal/" {
+		t.Fatalf("purgeURL() = %q", got)
+	}
+
+	t.Setenv("RSC_PURGE_URL", "")
+
+	if got := purgeURL(); got != "http://homeport.internal/" {
+		t.Fatalf("purgeURL() = %q, and Homeport's name was not read", got)
+	}
+}
+
 func TestHomeportIsTheDefaultAndSetPurgerNilTurnsItOff(t *testing.T) {
-	t.Setenv("HOMEPORT_PURGE_URL", "http://purge.internal/")
+	t.Setenv("RSC_PURGE_URL", "http://purge.internal/")
 
 	reg := NewRegistry()
 	if reg.currentPurger() == nil {
-		t.Fatal("HOMEPORT_PURGE_URL set, and no purge")
+		t.Fatal("RSC_PURGE_URL set, and no purge")
 	}
 
 	reg.SetPurger(nil)
