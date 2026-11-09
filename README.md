@@ -448,6 +448,14 @@ It refuses a cross-site browser request by `Sec-Fetch-Site` (or `Origin` against
 arrives. The callback endpoint needs none: it is answered only with the shared
 secret, which a browser cannot be made to send.
 
+A Content-Security-Policy for the pages is the renderer's:
+`rscKit({ contentSecurityPolicy: {} })` sends one on every page, allowing the
+page's own inline code by hash, or by a nonce that React puts on what it
+streams. Do not wrap the renderer in a Go middleware that sets its own policy:
+React never sees that nonce, so every streamed page is refused, and two
+policies are both enforced. Your own routes can carry whatever policy they
+like.
+
 ## Conformance
 
 `cmd/conformance` serves the functions rsc-kit's conformance suite calls,
