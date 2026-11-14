@@ -423,6 +423,9 @@ limit; a larger one is refused with 413.
   Empty during a build-time render, which has no visitor.
 - `rsckit.ClientIP(ctx)` is the visitor's address, read from
   `X-Rsc-Client-Ip` only once the secret matched. Empty with no visitor.
+- `rsckit.ClientUserAgent(ctx)` is the visitor's browser, from
+  `X-Rsc-Client-User-Agent`, for a log or an audit entry. `r.UserAgent()` is
+  the renderer's runtime. Empty with no visitor.
 - A panic becomes an error for that one call. It does not take down the
   server, and every other render in flight survives it — including a panic
   in a result's own `MarshalJSON`. The panic is logged with its stack

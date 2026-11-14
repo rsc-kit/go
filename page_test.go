@@ -37,6 +37,24 @@ func TestClientIPIsNeverReadWithoutTheSecret(t *testing.T) {
 	}
 }
 
+// The call's own User-Agent is the renderer's runtime: a log of who made a
+// request saw the same one for every visitor.
+func TestClientUserAgentIsTheOneTheRendererSent(t *testing.T) {
+	h := handler(t, func(r *Registry) {
+		r.Register("Who.agent", func(ctx context.Context, _ Args) (any, error) { return ClientUserAgent(ctx), nil })
+	})
+
+	reply := decode(t, post(h, `{"function":"Who.agent","args":[]}`, map[string]string{ClientUserAgentHeader: "Mozilla/5.0 (Visitor)"}))
+	if reply.Result != "Mozilla/5.0 (Visitor)" {
+		t.Fatalf("ClientUserAgent = %v", reply.Result)
+	}
+
+	reply = decode(t, post(h, `{"function":"Who.agent","args":[]}`, nil))
+	if reply.Result != "" {
+		t.Fatalf("with none sent, ClientUserAgent = %v", reply.Result)
+	}
+}
+
 func TestAGuardReadsThePageItIsAskedAbout(t *testing.T) {
 	var seen Page
 	var had bool
