@@ -387,7 +387,7 @@ const ClientUserAgentHeader = "X-Rsc-Client-User-Agent"
 // carried the secret.
 //
 // Empty when the renderer did not send one: a build-time render, a page
-// stored for everyone, or an engine before 0.36.0.
+// stored for everyone, or an engine before 0.35.0.
 func ClientUserAgent(ctx context.Context) string {
 	agent, _ := ctx.Value(clientUserAgentKey).(string)
 
