@@ -105,6 +105,8 @@ func main() {
 
 	reg.Handle("Conformance.ip", func(ctx context.Context) string { return rsckit.ClientIP(ctx) })
 
+	reg.Handle("Conformance.userAgent", func(ctx context.Context) string { return rsckit.ClientUserAgent(ctx) })
+
 	reg.Handle("Conformance.login", func(ctx context.Context) string {
 		rsckit.SetCookie(ctx, &http.Cookie{Name: "conformance_login", Value: "1", Path: "/", HttpOnly: true})
 

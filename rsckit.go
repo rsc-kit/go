@@ -354,6 +354,7 @@ const (
 	revalidateKey
 	cookieKey
 	clientIPKey
+	clientUserAgentKey
 	pageKey
 )
 
@@ -373,6 +374,24 @@ func ClientIP(ctx context.Context) string {
 	ip, _ := ctx.Value(clientIPKey).(string)
 
 	return ip
+}
+
+// ClientUserAgentHeader carries the visitor's User-Agent on every host call
+// the renderer makes for a request.
+const ClientUserAgentHeader = "X-Rsc-Client-User-Agent"
+
+// ClientUserAgent is the User-Agent of the visitor the call is being made for
+// - what a log, a list of signed-in devices or an audit entry records. The
+// call's own, r.UserAgent(), is the renderer's runtime and the same for
+// everyone; this is the one the renderer sent, believed because the call
+// carried the secret.
+//
+// Empty when the renderer did not send one: a build-time render, a page
+// stored for everyone, or an engine before 0.36.0.
+func ClientUserAgent(ctx context.Context) string {
+	agent, _ := ctx.Value(clientUserAgentKey).(string)
+
+	return agent
 }
 
 // Page is what a route guard is asked about: the url the visitor asked for,
@@ -749,6 +768,10 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// calling for.
 	if ip := strings.TrimSpace(r.Header.Get(ClientIPHeader)); ip != "" {
 		ctx = context.WithValue(ctx, clientIPKey, ip)
+	}
+
+	if agent := strings.TrimSpace(r.Header.Get(ClientUserAgentHeader)); agent != "" {
+		ctx = context.WithValue(ctx, clientUserAgentKey, agent)
 	}
 
 	// The names this call changes, purged from the CDN once it has answered:
