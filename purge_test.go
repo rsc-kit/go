@@ -94,27 +94,28 @@ func TestChangedOutsideAHostCallPurgesInTheBackground(t *testing.T) {
 	}
 }
 
-func TestRscPurgeURLComesBeforeHomeports(t *testing.T) {
+func TestCDNPurgeURLIsTheOnlyNameRead(t *testing.T) {
 	t.Setenv("HOMEPORT_PURGE_URL", "http://homeport.internal/")
-	t.Setenv("RSC_PURGE_URL", "http://edge.internal/")
+	t.Setenv("CDN_PURGE_URL", "http://edge.internal/")
 
 	if got := purgeURL(); got != "http://edge.internal/" {
 		t.Fatalf("purgeURL() = %q", got)
 	}
 
-	t.Setenv("RSC_PURGE_URL", "")
+	t.Setenv("CDN_PURGE_URL", "")
+	t.Setenv("RSC_PURGE_URL", "http://rsc.internal/")
 
-	if got := purgeURL(); got != "http://homeport.internal/" {
-		t.Fatalf("purgeURL() = %q, and Homeport's name was not read", got)
+	if got := purgeURL(); got != "" {
+		t.Fatalf("purgeURL() = %q, from a name that is not CDN_PURGE_URL", got)
 	}
 }
 
-func TestHomeportIsTheDefaultAndSetPurgerNilTurnsItOff(t *testing.T) {
-	t.Setenv("RSC_PURGE_URL", "http://purge.internal/")
+func TestCDNPurgerIsTheDefaultAndSetPurgerNilTurnsItOff(t *testing.T) {
+	t.Setenv("CDN_PURGE_URL", "http://purge.internal/")
 
 	reg := NewRegistry()
 	if reg.currentPurger() == nil {
-		t.Fatal("RSC_PURGE_URL set, and no purge")
+		t.Fatal("CDN_PURGE_URL set, and no purge")
 	}
 
 	reg.SetPurger(nil)
@@ -143,7 +144,7 @@ func TestAFailedPurgeIsLoggedAndNeverFailsTheChange(t *testing.T) {
 	}
 }
 
-func TestHomeportPurgerSendsJSONInCallsOfAtMost100(t *testing.T) {
+func TestCDNPurgerSendsJSONInCallsOfAtMost100(t *testing.T) {
 	var mu sync.Mutex
 	var bodies []Purge
 	status := []int{http.StatusTooManyRequests}
@@ -178,7 +179,7 @@ func TestHomeportPurgerSendsJSONInCallsOfAtMost100(t *testing.T) {
 		tags[i] = "t" + string(rune('a'+i%26))
 	}
 
-	if err := HomeportPurger(server.URL, nil)(context.Background(), Purge{Tags: tags}); err != nil {
+	if err := CDNPurger(server.URL, nil)(context.Background(), Purge{Tags: tags}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,12 +193,12 @@ func TestHomeportPurgerSendsJSONInCallsOfAtMost100(t *testing.T) {
 	}))
 	defer refusing.Close()
 
-	if err := HomeportPurger(refusing.URL, nil)(context.Background(), Purge{Tags: []string{"a"}}); err == nil {
+	if err := CDNPurger(refusing.URL, nil)(context.Background(), Purge{Tags: []string{"a"}}); err == nil {
 		t.Fatal("a 400 was not an error")
 	}
 }
 
-func TestHomeportPurgerCountsTagsAndPathsTogether(t *testing.T) {
+func TestCDNPurgerCountsTagsAndPathsTogether(t *testing.T) {
 	var (
 		mu     sync.Mutex
 		bodies []Purge
@@ -222,7 +223,7 @@ func TestHomeportPurgerCountsTagsAndPathsTogether(t *testing.T) {
 
 	purge := Purge{Tags: []string{"a", "b", strings.Repeat("x", 1025)}, Paths: append(paths, strings.Repeat("/", 2049))}
 
-	if err := HomeportPurger(server.URL, nil)(context.Background(), purge); err != nil {
+	if err := CDNPurger(server.URL, nil)(context.Background(), purge); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,18 +233,18 @@ func TestHomeportPurgerCountsTagsAndPathsTogether(t *testing.T) {
 	}
 }
 
-func TestHomeportPurgerAcceptsOnlyA202(t *testing.T) {
+func TestCDNPurgerAcceptsOnlyA202(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	if err := HomeportPurger(server.URL, nil)(context.Background(), Purge{Tags: []string{"a"}}); err == nil {
+	if err := CDNPurger(server.URL, nil)(context.Background(), Purge{Tags: []string{"a"}}); err == nil {
 		t.Fatal("a 200 was taken for accepted")
 	}
 }
 
-func TestHomeportPurgerTriesASecond429NoFurtherAndSendsTheRest(t *testing.T) {
+func TestCDNPurgerTriesASecond429NoFurtherAndSendsTheRest(t *testing.T) {
 	var (
 		mu    sync.Mutex
 		sizes []int
@@ -274,7 +275,7 @@ func TestHomeportPurgerTriesASecond429NoFurtherAndSendsTheRest(t *testing.T) {
 		tags[i] = "t"
 	}
 
-	if err := HomeportPurger(server.URL, nil)(context.Background(), Purge{Tags: tags}); err == nil {
+	if err := CDNPurger(server.URL, nil)(context.Background(), Purge{Tags: tags}); err == nil {
 		t.Fatal("a second 429 was not an error")
 	}
 
