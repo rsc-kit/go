@@ -106,6 +106,9 @@ type Registry struct {
 	// struct types they refer to.
 	sigs     map[string]Signature
 	typeDefs *defs
+	// validates are the functions that stop before writing when a call is
+	// a check - see Validates.
+	validates map[string]bool
 
 	// Versions a page refreshes on - see changed.go. moved is closed by each
 	// Changed in this process, waking a ChangedFunction call being held.
@@ -135,7 +138,49 @@ func NewRegistry() *Registry {
 		guards:  make(map[string]Guard),
 		actions: make(map[string]string),
 		sigs:    make(map[string]Signature),
+
+		validates: make(map[string]bool),
 	}
+}
+
+// Validates says the functions named can answer a check: a form asking
+// whether its fields would pass before it is submitted. Such a function
+// validates its input as it always does, and then, when Checking says the
+// call is a check, returns before it writes anything:
+//
+//	if err := in.validate(); err != nil {
+//		return nil, err
+//	}
+//	if _, checking := rsckit.Checking(ctx); checking {
+//		return nil, nil
+//	}
+//
+// A pass is a nil result; a failure is the ValidationError a submit would
+// return, and the renderer keeps only the fields the form asked about.
+// The renderer sends a check to no function this does not name, because one
+// that never asks Checking would run the call. It panics on a name not
+// registered yet, at startup, where the mistake is.
+func (r *Registry) Validates(names ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, name := range names {
+		if _, ok := r.fns[name]; !ok {
+			panic(fmt.Sprintf("rsckit: Validates(%q) names no registered function; register it first", name))
+		}
+
+		r.validates[name] = true
+	}
+}
+
+// Checking is the fields a check asks about - every field when the list is
+// empty - and whether this call is a check at all. A function Validates
+// names returns once its input is validated when it is: nothing it would
+// write may be written. See Validates.
+func Checking(ctx context.Context) (fields []string, ok bool) {
+	fields, ok = ctx.Value(checkingKey).([]string)
+
+	return fields, ok
 }
 
 // Middleware registers a guard under the name a route.ts uses for it.
@@ -186,6 +231,9 @@ type Manifest struct {
 	// Defs are the named struct types those signatures refer to, by
 	// "$ref": "#/defs/Name". One TypeScript interface each.
 	Defs map[string]Schema `json:"defs,omitempty"`
+	// Validates are the functions that can answer a check without running,
+	// sorted - see Registry.Validates.
+	Validates []string `json:"validates,omitempty"`
 }
 
 // Manifest lists what this registry offers the app.
@@ -210,9 +258,14 @@ func (r *Registry) Manifest() Manifest {
 			named[name] = schema
 		}
 	}
+	var validates []string
+	for name := range r.validates {
+		validates = append(validates, name)
+	}
+	sort.Strings(validates)
 	r.mu.RUnlock()
 
-	return Manifest{Actions: actions, Functions: r.Names(), Types: types, Defs: named}
+	return Manifest{Actions: actions, Functions: r.Names(), Types: types, Defs: named, Validates: validates}
 }
 
 // WriteManifest writes rsc-host.json where the build looks for it - the
@@ -352,6 +405,7 @@ type ctxKey int
 const (
 	headerKey ctxKey = iota
 	revalidateKey
+	checkingKey
 	cookieKey
 	clientIPKey
 	clientUserAgentKey
@@ -493,6 +547,9 @@ type callRequest struct {
 	// A batch: several calls the renderer issued in one tick of a render,
 	// run concurrently and answered as each finishes. Set instead of Function.
 	Calls []callRequest `json:"calls"`
+	// A check rather than a run: the fields to validate, every one when the
+	// list is empty. Absent on an ordinary call - see Registry.Validates.
+	Validate *[]string `json:"validate"`
 }
 
 // batchLine is one answer inside a batch, written the moment its call has
@@ -825,7 +882,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Answered on its own, so its headers are still unsent: a cookie the
 	// function sets - a login - rides on this response.
 	cookies := &cookieBox{}
-	status, reply := h.dispatch(context.WithValue(ctx, cookieKey, cookies), call)
+	status, reply := h.dispatch(context.WithValue(ctx, cookieKey, cookies), call, false)
 
 	for _, cookie := range cookies.cookies {
 		http.SetCookie(w, cookie)
@@ -855,7 +912,7 @@ func (h *CallbackHandler) serveBatch(ctx context.Context, w http.ResponseWriter,
 		go func(index int, one callRequest) {
 			defer wg.Done()
 
-			status, reply := h.dispatch(ctx, one)
+			status, reply := h.dispatch(ctx, one, true)
 			line := batchLineFor(index, status, reply)
 
 			mu.Lock()
@@ -873,7 +930,7 @@ func (h *CallbackHandler) serveBatch(ctx context.Context, w http.ResponseWriter,
 
 // dispatch runs one call and decides its answer. Each call gets its own
 // revalidation box, so what one marked stale never rides on another's reply.
-func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, callReply) {
+func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest, batched bool) (int, callReply) {
 	fn, ok := h.registry.lookup(call.Function)
 	if !ok {
 		// Named, because the JS side deliberately cannot say which function is
@@ -881,6 +938,23 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 		return http.StatusNotFound, callReply{
 			Error: fmt.Sprintf("no host function named %q; registered: %v", call.Function, h.registry.Names()),
 		}
+	}
+
+	// A check goes only to a function that said it stops before writing;
+	// any other would run the call. Never in a batch: the renderer sends a
+	// check alone, and one that arrives in a batch is not from it.
+	if call.Validate != nil {
+		if batched {
+			return http.StatusBadRequest, callReply{Error: "a check is sent alone, never in a batch"}
+		}
+
+		if !h.registry.canCheck(call.Function) {
+			return http.StatusBadRequest, callReply{
+				Error: fmt.Sprintf("%q cannot be checked without running; name it in Registry.Validates once it returns when Checking says so", call.Function),
+			}
+		}
+
+		ctx = context.WithValue(ctx, checkingKey, append([]string{}, (*call.Validate)...))
 	}
 
 	box := &revalidations{}
@@ -899,7 +973,20 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest) (int, 
 		return status, reply
 	}
 
+	// A check wrote nothing, so it changed nothing: what a passing one
+	// answers is a pass, whatever the function returned.
+	if call.Validate != nil {
+		return http.StatusOK, callReply{}
+	}
+
 	return http.StatusOK, callReply{Result: result, Revalidate: box.all()}
+}
+
+func (r *Registry) canCheck(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.validates[name]
 }
 
 // replyFor turns what a function returned into the answer on the wire.
