@@ -401,6 +401,30 @@ browser reads it, so it is not `HttpOnly` - nothing secret goes in a flash. A
 message the visitor still carries, and one left earlier in the call, are kept
 ahead of it.
 
+### Checked before it is submitted
+
+A form asks whether a changed field would pass before anyone presses the
+button. A Go function's validation is inside it, so it opts in: validate as
+always, then return before writing when `Checking` says the call is a check,
+and name it in `Validates`.
+
+```go
+reg.HandleAction("subscribe", "Newsletter.subscribe", func(ctx context.Context, in Subscribe) (any, error) {
+	if err := in.validate(); err != nil {
+		return nil, err // a *ValidationError: the form keeps the fields it asked about
+	}
+	if _, checking := rsckit.Checking(ctx); checking {
+		return nil, nil
+	}
+	return subscribe(ctx, in)
+})
+reg.Validates("Newsletter.subscribe")
+```
+
+`WriteManifest` lists those functions under `validates`, and the renderer sends
+a check to no other: one that never asks `Checking` would run the call. A check
+to an unlisted function, or inside a batch, is answered 400 without running it.
+
 ## Batches
 
 Calls the renderer issued in one tick of a render — sibling components each
