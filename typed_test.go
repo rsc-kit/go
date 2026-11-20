@@ -276,9 +276,9 @@ func TestTheManifestDescribesEachSignature(t *testing.T) {
 
 	var m struct {
 		Actions   map[string]map[string]string `json:"actions"`
-		Functions []string                  `json:"functions"`
-		Types     map[string]map[string]any `json:"types"`
-		Defs      map[string]map[string]any `json:"defs"`
+		Functions []string                     `json:"functions"`
+		Types     map[string]map[string]any    `json:"types"`
+		Defs      map[string]map[string]any    `json:"defs"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("%s", raw)
