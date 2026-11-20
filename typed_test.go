@@ -263,7 +263,7 @@ func TestARefusalCarriesItsDataOnTheWire(t *testing.T) {
 func TestTheManifestDescribesEachSignature(t *testing.T) {
 	reg := NewRegistry()
 	reg.Handle("Orders.recent", func(ctx context.Context, limit int) ([]tOrder, error) { return nil, nil })
-	reg.HandleAction("ordersFind", "Orders.find", func(id int, opts *tFind) (tOrder, error) { return tOrder{}, nil })
+	reg.HandleAction("Orders.find", func(id int, opts *tFind) (tOrder, error) { return tOrder{}, nil })
 	reg.Handle("Tags.join", func(sep string, tags ...string) string { return "" })
 	reg.Register("Legacy.read", func(context.Context, Args) (any, error) { return nil, nil })
 
@@ -275,7 +275,7 @@ func TestTheManifestDescribesEachSignature(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 
 	var m struct {
-		Actions   map[string]string         `json:"actions"`
+		Actions   map[string]map[string]string `json:"actions"`
 		Functions []string                  `json:"functions"`
 		Types     map[string]map[string]any `json:"types"`
 		Defs      map[string]map[string]any `json:"defs"`

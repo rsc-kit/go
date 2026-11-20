@@ -30,6 +30,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -101,7 +102,7 @@ type Registry struct {
 	mu      sync.RWMutex
 	fns     map[string]Func
 	guards  map[string]Guard
-	actions map[string]string
+	actions map[string]map[string]string
 	// sigs are the types of what Handle registered; typeDefs the named
 	// struct types they refer to.
 	sigs     map[string]Signature
@@ -136,7 +137,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		fns:     make(map[string]Func),
 		guards:  make(map[string]Guard),
-		actions: make(map[string]string),
+		actions: make(map[string]map[string]string),
 		sigs:    make(map[string]Signature),
 
 		validates: make(map[string]bool),
@@ -198,29 +199,74 @@ func (r *Registry) Middleware(name string, guard Guard) {
 }
 
 // RegisterAction registers a function the browser may call as a server
-// action, under jsName in the app's code.
+// action.
 //
-// The build reads it from rsc-host.json and writes a "use server" module
-// exporting jsName; a client component imports it and calls it, and the call
-// arrives here under name. WriteManifest writes that file.
-func (r *Registry) RegisterAction(jsName, name string, fn Func) {
+// The build reads it from rsc-host.json and writes a "use server" module per
+// class: "Orders.create" is create in server-actions/orders, and a name with
+// no method, "SendInvite", is the default export of server-actions/send-invite.
+// A client component imports it and calls it, and the call arrives here under
+// name. WriteManifest writes that file.
+func (r *Registry) RegisterAction(name string, fn Func) {
+	module, export := actionModule(name)
+
 	r.Register(name, fn)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.actions[jsName]; exists {
-		panic(fmt.Sprintf("rsckit: action %q registered twice", jsName))
+	if r.actions[module] == nil {
+		r.actions[module] = map[string]string{}
 	}
 
-	r.actions[jsName] = name
+	if other, exists := r.actions[module][export]; exists {
+		panic(fmt.Sprintf("rsckit: %q and %q are both %s in server-actions/%s", other, name, export, module))
+	}
+
+	r.actions[module][export] = name
 }
+
+// actionModule is where the build puts an action: the class in kebab case,
+// a dotted prefix as folders - "Billing.Invoices.create" is create in
+// billing/invoices - and a name with no method the module's default. The
+// same rule as Laravel's, so an app reads the same import from either.
+func actionModule(name string) (module, export string) {
+	parts := strings.Split(name, ".")
+	export = "default"
+
+	if len(parts) > 1 {
+		export = parts[len(parts)-1]
+		parts = parts[:len(parts)-1]
+	}
+
+	if !jsIdentifier.MatchString(export) {
+		panic(fmt.Sprintf("rsckit: action %q: %q is not a name JavaScript can export", name, export))
+	}
+
+	for i, part := range parts {
+		kebab := strings.Trim(nonModule.ReplaceAllString(strings.ToLower(upperAfterFirst.ReplaceAllString(part, "$1-$2")), "-"), "-")
+
+		if kebab == "" {
+			panic(fmt.Sprintf("rsckit: action %q has an empty class name", name))
+		}
+
+		parts[i] = kebab
+	}
+
+	return strings.Join(parts, "/"), export
+}
+
+var (
+	jsIdentifier    = regexp.MustCompile(`^[A-Za-z_$][\w$]*$`)
+	upperAfterFirst = regexp.MustCompile(`(.)([A-Z])`)
+	nonModule       = regexp.MustCompile(`[^a-z0-9]+`)
+)
 
 // Manifest is what the build reads from rsc-host.json.
 type Manifest struct {
-	// Actions maps each action's JavaScript name to the name it is
-	// registered under; the build writes a "use server" stub for each.
-	Actions map[string]string `json:"actions"`
+	// Actions maps each module - a class, its path under server-actions/ -
+	// to the names it exports, each to the name it is registered under. The
+	// build writes a "use server" module for each.
+	Actions map[string]map[string]string `json:"actions"`
 	// Functions is every name rpc() may call, sorted; the build turns it
 	// into a type, so a misspelt name fails the typecheck.
 	Functions []string `json:"functions"`
@@ -239,9 +285,12 @@ type Manifest struct {
 // Manifest lists what this registry offers the app.
 func (r *Registry) Manifest() Manifest {
 	r.mu.RLock()
-	actions := make(map[string]string, len(r.actions))
-	for js, name := range r.actions {
-		actions[js] = name
+	actions := make(map[string]map[string]string, len(r.actions))
+	for module, exports := range r.actions {
+		actions[module] = make(map[string]string, len(exports))
+		for export, name := range exports {
+			actions[module][export] = name
+		}
 	}
 	var types map[string]Signature
 	if len(r.sigs) > 0 {

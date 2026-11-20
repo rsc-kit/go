@@ -42,7 +42,7 @@ func subscribing(writes *int) func(context.Context, subscribeForm) (any, error) 
 
 func checkable(t *testing.T, writes *int) *CallbackHandler {
 	return handler(t, func(r *Registry) {
-		r.HandleAction("subscribe", "Newsletter.subscribe", subscribing(writes))
+		r.HandleAction("Newsletter.subscribe", subscribing(writes))
 		r.Validates("Newsletter.subscribe")
 	})
 }
@@ -142,7 +142,7 @@ func TestACheckInABatchIsRefused(t *testing.T) {
 
 func TestTheManifestListsWhatCanBeChecked(t *testing.T) {
 	reg := NewRegistry()
-	reg.HandleAction("subscribe", "Newsletter.subscribe", subscribing(new(int)))
+	reg.HandleAction("Newsletter.subscribe", subscribing(new(int)))
 	reg.Register("Orders.create", func(context.Context, Args) (any, error) { return nil, nil })
 	reg.Validates("Newsletter.subscribe")
 
