@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -204,8 +205,8 @@ func TestTheReservedNameCannotBeRegisteredAsAFunction(t *testing.T) {
 // name rpc() may call. This is the Go side of that handoff.
 func TestTheManifestIsWhatTheBuildReads(t *testing.T) {
 	reg := NewRegistry()
-	reg.RegisterAction("ordersCancel", "Orders.cancel", func(context.Context, Args) (any, error) { return nil, nil })
-	reg.RegisterAction("profileUpdate", "Profile.update", func(context.Context, Args) (any, error) { return nil, nil })
+	reg.RegisterAction("Orders.cancel", func(context.Context, Args) (any, error) { return nil, nil })
+	reg.RegisterAction("Profile.update", func(context.Context, Args) (any, error) { return nil, nil })
 	reg.Register("Orders.recent", func(context.Context, Args) (any, error) { return nil, nil })
 
 	path := filepath.Join(t.TempDir(), "rsc-host.json")
@@ -216,8 +217,8 @@ func TestTheManifestIsWhatTheBuildReads(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 
 	var manifest struct {
-		Actions   map[string]string `json:"actions"`
-		Functions []string          `json:"functions"`
+		Actions   map[string]map[string]string `json:"actions"`
+		Functions []string                     `json:"functions"`
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %s", raw)
@@ -225,8 +226,9 @@ func TestTheManifestIsWhatTheBuildReads(t *testing.T) {
 
 	// Actions only in the stubs. A read a server component calls is not
 	// something the browser should be handed a stub for.
-	want := map[string]string{"ordersCancel": "Orders.cancel", "profileUpdate": "Profile.update"}
-	if len(manifest.Actions) != len(want) || manifest.Actions["ordersCancel"] != want["ordersCancel"] || manifest.Actions["profileUpdate"] != want["profileUpdate"] {
+	// One module per class, each exporting its methods.
+	want := map[string]map[string]string{"orders": {"cancel": "Orders.cancel"}, "profile": {"update": "Profile.update"}}
+	if !reflect.DeepEqual(manifest.Actions, want) {
 		t.Fatalf("actions = %v, want %v", manifest.Actions, want)
 	}
 

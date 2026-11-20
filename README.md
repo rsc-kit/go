@@ -295,7 +295,7 @@ type ContactInput struct {
 	Topic string `json:"topic" validate:"required,oneof=sales support"`
 }
 
-reg.HandleAction("contactSend", "Contact.send", func(in ContactInput) (string, error) {
+reg.HandleAction("Contact.send", func(in ContactInput) (string, error) {
 	if taken(in.Email) {
 		return "", rsckit.InvalidField("email", "That address is taken.")
 	}
@@ -304,13 +304,13 @@ reg.HandleAction("contactSend", "Contact.send", func(in ContactInput) (string, e
 })
 ```
 
-The build generates `contactSend`, and the form takes it. `bunx rsc-kit make:form contactSend`
-writes this file:
+The build generates `send` in `server-actions/contact`, and the form takes it.
+`bunx rsc-kit make:form Contact.send` writes this file:
 
 ```ts
-import { contactSend } from '../server-actions.generated'
+import { send } from '../server-actions/contact'
 
-export const contact = defineForm({ name: 'contact', action: contactSend, theme: shadcn, done: 'Thanks.' })
+export const contact = defineBlueprint({ name: 'contact', actions: { create: send }, theme: shadcn, done: 'Thanks.' })
 ```
 
 `validate` tags become the browser's hints and nothing more: this package
@@ -321,7 +321,7 @@ the field. A tag the browser cannot use is left out. `defineForm` is in
 ## Server actions
 
 ```go
-reg.HandleAction("ordersCancel", "Orders.cancel", func(ctx context.Context, id int) error { … })
+reg.HandleAction("Orders.cancel", func(ctx context.Context, id int) error { … })
 reg.WriteManifest("rsc-host.json")
 ```
 
@@ -333,12 +333,15 @@ under `type`, so `error('type')` fails the typecheck on a bound stub. A tag
 A form can post to an action directly; its fields arrive as the struct
 parameter, decoded into the struct: the first, or the one after the arguments
 you bound. An action scoped to a team, `func(ctx, team string, in NewApp)`, is
-`<Form action={appsCreate.bind(null, team)}>`.
+`<Form action={apps.create.bind(null, team)}>`.
 
 `rsc-host.json` has `actions`, `functions`, and the `types` and `defs` of
 what `Handle` registered. The build
-writes `server-actions.generated.ts` beside the app, exporting `ordersCancel`;
-a client component imports and calls it, and the call arrives here as
+writes a `"use server"` module per class beside the app: `Orders.cancel` is
+`cancel` in `server-actions/orders`, a dotted prefix is a folder
+(`Billing.Invoices.send` is `server-actions/billing/invoices`), and a name with
+no method, `SendInvite`, is the default export of `server-actions/send-invite`.
+A client component imports and calls it, and the call arrives here as
 `Orders.cancel`. The function names become the type of `rpc()`'s first
 argument, so `rpc('Orders.recnet')` fails the typecheck.
 
@@ -366,7 +369,7 @@ again.
 login keeps its session:
 
 ```go
-reg.HandleAction("authLogin", "Auth.login", func(ctx context.Context, in Login) error {
+reg.HandleAction("Auth.login", func(ctx context.Context, in Login) error {
 	session, err := sessions.Start(ctx, in)
 	if err != nil {
 		return rsckit.InvalidField("email", "Those details do not match.")
@@ -385,7 +388,7 @@ lands on next, shown once by `useFlash()` from `@rsc-kit/core/useFlash` (0.30.39
 or later) - the same message a JavaScript action's `flash()` leaves:
 
 ```go
-reg.HandleAction("invoicesSend", "Invoices.send", func(ctx context.Context, id int) error {
+reg.HandleAction("Invoices.send", func(ctx context.Context, id int) error {
 	if err := invoices.Send(ctx, id); err != nil {
 		return err
 	}
@@ -409,7 +412,7 @@ always, then return before writing when `Checking` says the call is a check,
 and name it in `Validates`.
 
 ```go
-reg.HandleAction("subscribe", "Newsletter.subscribe", func(ctx context.Context, in Subscribe) (any, error) {
+reg.HandleAction("Newsletter.subscribe", func(ctx context.Context, in Subscribe) (any, error) {
 	if err := in.validate(); err != nil {
 		return nil, err // a *ValidationError: the form keeps the fields it asked about
 	}

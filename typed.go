@@ -69,11 +69,12 @@ func (r *Registry) Handle(name string, fn any) {
 	r.mu.Unlock()
 }
 
-// HandleAction is Handle for a server action, exported to the app as jsName.
-// A form posting to it sends its fields as the first parameter.
-func (r *Registry) HandleAction(jsName, name string, fn any) {
+// HandleAction is Handle for a server action: "Orders.create" is create in
+// the app's server-actions/orders. A form posting to it sends its fields as
+// the first parameter.
+func (r *Registry) HandleAction(name string, fn any) {
 	call, sig := typedFunc(name, fn, r.defs())
-	r.RegisterAction(jsName, name, call)
+	r.RegisterAction(name, call)
 
 	r.mu.Lock()
 	r.sigs[name] = sig
