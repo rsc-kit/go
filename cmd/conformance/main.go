@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8123", "where to listen")
 	secret := flag.String("secret", "test", "the shared secret")
 	manifest := flag.String("manifest", "", "write rsc-host.json here before serving")
+	calls := flag.Bool("calls", false, "answer a build's calls on stdin and stdout")
 	flag.Parse()
 
 	reg := rsckit.NewRegistry()
@@ -143,6 +145,16 @@ func main() {
 
 		return nil
 	})
+
+	reg.BuildCalls("-calls")
+
+	if *calls {
+		if err := reg.ServeCalls(os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
 
 	if *manifest != "" {
 		if err := reg.WriteManifest(*manifest); err != nil {
