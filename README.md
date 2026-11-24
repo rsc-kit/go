@@ -361,6 +361,44 @@ rscKit({
 It runs as `vite` and `vite build` start. A build fails if it fails; dev
 reports it and uses the file already there.
 
+## Answered at build time
+
+The build can ask Go for what `rpc()` reads, and store the answer with the page.
+Say the flag that does it, and serve the calls when it is given - before the
+manifest's own branch, since the build adds the flag to the same command:
+
+```go
+calls := flag.Bool("calls", false, "answer a build's calls on stdin and stdout")
+// ...register the functions...
+reg.BuildCalls("-calls")
+
+if *calls {
+	if err := reg.ServeCalls(os.Stdin, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+	return
+}
+```
+
+A function that reads the visitor is not answered: the page streams it per
+request, as it does without any of this. Go reaches a visitor only through the
+context, so that is what is watched - `HeadersFrom`, `ClientIP`,
+`ClientUserAgent`, `SetCookie`, `Flash`, and any value your own middleware would
+have put there, such as a signed-in user. A function that takes no context, or
+only hands it to a database, is answered once. The build report names what each
+call read.
+
+Three things to know:
+
+- The build runs your functions, so it needs what they need: the database, the
+  environment. An error from one fails the build.
+- A context key that says nothing about the visitor - a request id, your own
+  tracing - keeps a page from being stored. Name its package or its type:
+  `reg.ServeCalls(os.Stdin, os.Stdout, rsckit.NotTheVisitor("main.requestIDKey"))`.
+  OpenTelemetry, zerolog, pgx and the other usual ones are already known.
+- What is read from anywhere but the context is not seen. A page whose answer
+  is the same for everyone and must still be fresh says `await connection()`.
+
 `rsckit.Revalidate(ctx, "orders")` inside an action marks a region stale, so
 the answer carries it re-rendered instead of the browser being told to ask
 again.
@@ -497,7 +535,8 @@ the type the manifest declares. To run it locally:
 ```sh
 go run ./cmd/conformance -manifest /tmp/rsc-host.json &
 npx -y -p @rsc-kit/core rsc-kit-conformance \
-  --endpoint http://127.0.0.1:8123/__rsc/host-call --secret test --manifest /tmp/rsc-host.json
+  --endpoint http://127.0.0.1:8123/__rsc/host-call --secret test --manifest /tmp/rsc-host.json \
+  --calls "go run ./cmd/conformance -calls"
 ```
 
 ## Tests

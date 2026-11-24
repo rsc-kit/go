@@ -110,6 +110,9 @@ type Registry struct {
 	// validates are the functions that stop before writing when a call is
 	// a check - see Validates.
 	validates map[string]bool
+	// buildCalls are the arguments the manifest command answers a build's
+	// calls with - see BuildCalls.
+	buildCalls []string
 
 	// Versions a page refreshes on - see changed.go. moved is closed by each
 	// Changed in this process, waking a ChangedFunction call being held.
@@ -280,6 +283,9 @@ type Manifest struct {
 	// Validates are the functions that can answer a check without running,
 	// sorted - see Registry.Validates.
 	Validates []string `json:"validates,omitempty"`
+	// Calls are the arguments that make the command which wrote this answer a
+	// build's rpc() calls instead - see Registry.BuildCalls.
+	Calls []string `json:"calls,omitempty"`
 }
 
 // Manifest lists what this registry offers the app.
@@ -312,9 +318,10 @@ func (r *Registry) Manifest() Manifest {
 		validates = append(validates, name)
 	}
 	sort.Strings(validates)
+	calls := append([]string(nil), r.buildCalls...)
 	r.mu.RUnlock()
 
-	return Manifest{Actions: actions, Functions: r.Names(), Types: types, Defs: named, Validates: validates}
+	return Manifest{Actions: actions, Functions: r.Names(), Types: types, Defs: named, Validates: validates, Calls: calls}
 }
 
 // WriteManifest writes rsc-host.json where the build looks for it - the
