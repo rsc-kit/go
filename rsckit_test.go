@@ -241,6 +241,33 @@ func TestReportsWhatAFunctionInvalidated(t *testing.T) {
 	}
 }
 
+func TestARedirectCarriesWhatItInvalidatedFirst(t *testing.T) {
+	// A profile form that renamed the visitor, then redirected: without the
+	// mark the sidebar kept the old name.
+	h := handler(t, func(r *Registry) {
+		r.Register("Profile.update", func(ctx context.Context, _ Args) (any, error) {
+			Revalidate(ctx, "all")
+
+			return nil, Redirect("/settings/profile")
+		})
+		r.Register("Orders.delete", func(ctx context.Context, _ Args) (any, error) {
+			Revalidate(ctx, "orders")
+
+			return nil, Refuse(409, "Still in use")
+		})
+	})
+
+	reply := decode(t, post(h, `{"function":"Profile.update","args":[]}`, nil))
+	if reply.Redirect != "/settings/profile" || strings.Join(reply.Revalidate, ",") != "all" {
+		t.Fatalf("reply = %+v", reply)
+	}
+
+	// A refusal changed nothing, so it carries nothing.
+	if reply := decode(t, post(h, `{"function":"Orders.delete","args":[]}`, nil)); len(reply.Revalidate) != 0 {
+		t.Fatalf("a refusal carried revalidate = %v", reply.Revalidate)
+	}
+}
+
 func TestBindReportsTooFewArgumentsRatherThanZeroValues(t *testing.T) {
 	var got error
 

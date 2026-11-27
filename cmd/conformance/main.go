@@ -91,6 +91,12 @@ func main() {
 		return "ok"
 	})
 
+	reg.Handle("Conformance.revalidateThenRedirect", func(ctx context.Context) error {
+		rsckit.Revalidate(ctx, "orders")
+
+		return rsckit.Redirect("/login")
+	})
+
 	reg.Handle("Conformance.fail", func() error { return errors.New("boom") })
 
 	reg.Handle("Conformance.change", func(ctx context.Context) (string, error) {

@@ -1055,6 +1055,14 @@ func (h *CallbackHandler) dispatch(ctx context.Context, call callRequest, batche
 			reply.Debug = debugFor(call.Function, err)
 		}
 
+		// What it marked stale before redirecting goes with the redirect:
+		// Revalidate(ctx, "all") then Redirect("/settings") is how an action
+		// that changed a layout's data says so, and dropped here the layout
+		// kept what it showed. A refusal changed nothing, so carries nothing.
+		if reply.Redirect != "" {
+			reply.Revalidate = box.all()
+		}
+
 		return status, reply
 	}
 
