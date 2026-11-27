@@ -486,6 +486,24 @@ func ClientIP(ctx context.Context) string {
 	return ip
 }
 
+// PageHeader carries the page an action was posted from, as JSON
+// { url, params }, on every host call the action makes.
+const PageHeader = "X-Rsc-Page"
+
+// pageHeader reads PageHeader: a page with a url, or nothing.
+func pageHeader(value string) (Page, bool) {
+	var page Page
+	if value == "" || json.Unmarshal([]byte(value), &page) != nil || page.URL == "" {
+		return Page{}, false
+	}
+
+	if page.Params == nil {
+		page.Params = map[string]string{}
+	}
+
+	return page, true
+}
+
 // ClientUserAgentHeader carries the visitor's User-Agent on every host call
 // the renderer makes for a request.
 const ClientUserAgentHeader = "X-Rsc-Client-User-Agent"
@@ -511,12 +529,15 @@ type Page struct {
 	Params map[string]string `json:"params"`
 }
 
-// PageFrom is the page a guard is running for. The call is a POST from the
+// PageFrom is the page a guard is running for, or the page the action a
+// handler is running for was posted from. The call is a POST from the
 // renderer, so the request it arrives on says nothing about the page; this is
-// what the renderer sent beside the guard names.
+// what the renderer sent beside it.
 //
-// False outside a guard, and from an engine before 0.30.50, which sent no page
-// - a guard that needs one should refuse rather than pass without it.
+// False where there is none - a read, a call from no page, an engine before
+// 0.44 for an action - and a check that needs one should refuse rather than
+// pass without it. The url is the caller's choice, as a POST's is: authorize
+// the record a param names, never take the page as having done it.
 func PageFrom(ctx context.Context) (Page, bool) {
 	page, ok := ctx.Value(pageKey).(Page)
 
@@ -885,6 +906,14 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if agent := strings.TrimSpace(r.Header.Get(ClientUserAgentHeader)); agent != "" {
 		ctx = context.WithValue(ctx, clientUserAgentKey, agent)
+	}
+
+	// The page an action was posted from, since engine 0.44: what PageFrom
+	// answers in a handler, as it does in a guard. The caller chose it, as
+	// the caller of any POST chooses its url - a handler authorizes what it
+	// acts on, whatever page it names.
+	if page, ok := pageHeader(r.Header.Get(PageHeader)); ok {
+		ctx = context.WithValue(ctx, pageKey, page)
 	}
 
 	// The names this call changes, purged from the CDN once it has answered:

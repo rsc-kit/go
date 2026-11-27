@@ -159,6 +159,22 @@ reg.Middleware("owns-order", func(ctx context.Context, _ string) error {
 })
 ```
 
+An action's calls carry the page its form was posted from, and
+`rsckit.PageFrom(ctx)` answers it in a handler too (engine 0.44). The caller
+picks that page, as the caller of any POST picks its url, and the page's guards
+never run for an action: a handler checks who is asking and authorizes the
+record it acts on, whatever page it names.
+
+```go
+reg.Handle("Orders.cancel", func(ctx context.Context) error {
+	page, _ := rsckit.PageFrom(ctx)
+	if !owns(ctx, page.Params["order"]) {
+		return rsckit.Unauthorized("not your order")
+	}
+	return cancel(ctx, page.Params["order"])
+})
+```
+
 ## Saying data changed
 
 A section that says what it refreshes on refreshes in every open tab the
