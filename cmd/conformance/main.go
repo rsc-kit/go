@@ -133,17 +133,15 @@ func main() {
 	reg.Middleware("conformance-allow", func(context.Context, string) error { return nil })
 	reg.Middleware("conformance-deny", func(context.Context, string) error { return rsckit.Unauthorized() })
 	reg.Middleware("conformance-redirect", func(context.Context, string) error { return rsckit.Redirect("/conformance-login") })
-	reg.Middleware("conformance-page", func(ctx context.Context, _ string) error {
-		page, ok := rsckit.PageFrom(ctx)
-		if !ok || page.Params["order"] != "7" {
-			return rsckit.Unauthorized()
+	reg.Middleware("conformance-page", func(ctx context.Context, _ string) error { return orderSeven(ctx) })
+
+	// An action guards itself, against the page it was posted from.
+	reg.Handle("Conformance.onPage", func(ctx context.Context) (string, error) {
+		if err := orderSeven(ctx); err != nil {
+			return "", err
 		}
 
-		if u, err := url.Parse(page.URL); err != nil || u.Path != "/conformance/orders/7" {
-			return rsckit.Unauthorized()
-		}
-
-		return nil
+		return "ok", nil
 	})
 
 	reg.BuildCalls("-calls")
@@ -172,4 +170,18 @@ func main() {
 
 	log.Printf("conformance fixture on http://%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+// orderSeven passes only for the page /conformance/orders/{order} with order 7.
+func orderSeven(ctx context.Context) error {
+	page, ok := rsckit.PageFrom(ctx)
+	if !ok || page.Params["order"] != "7" {
+		return rsckit.Unauthorized()
+	}
+
+	if u, err := url.Parse(page.URL); err != nil || u.Path != "/conformance/orders/7" {
+		return rsckit.Unauthorized()
+	}
+
+	return nil
 }

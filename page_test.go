@@ -78,3 +78,30 @@ func TestAGuardReadsThePageItIsAskedAbout(t *testing.T) {
 		t.Fatalf("PageFrom reported a page nobody sent: %+v", seen)
 	}
 }
+
+// An action's calls carry the page it was posted from, and a handler reads it
+// as a guard does.
+func TestAHandlerReadsThePageItWasPostedFrom(t *testing.T) {
+	h := handler(t, func(r *Registry) {
+		r.Register("Posts.page", func(ctx context.Context, _ Args) (any, error) {
+			page, ok := PageFrom(ctx)
+			if !ok {
+				return "none", nil
+			}
+
+			return page.URL + " " + page.Params["post"] + " " + page.Params["note"], nil
+		})
+	})
+
+	call := `{"function":"Posts.page","args":[]}`
+
+	if got := decode(t, post(h, call, map[string]string{PageHeader: `{"url":"https://app.test/posts/1","params":{"post":"1","note":"caf\u00e9"}}`})).Result; got != "https://app.test/posts/1 1 café" {
+		t.Fatalf("from a page: %v", got)
+	}
+
+	for _, header := range []map[string]string{nil, {PageHeader: "not json"}, {PageHeader: `{"params":{"post":"1"}}`}} {
+		if got := decode(t, post(h, call, header)).Result; got != "none" {
+			t.Fatalf("%v answered a page: %v", header, got)
+		}
+	}
+}
